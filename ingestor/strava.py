@@ -15,8 +15,10 @@ _token_expires_at = 0
 
 
 def refresh_access_token(client_id: str, client_secret: str, refresh_token: str) -> str:
-    """POST to Strava token endpoint, return fresh access_token."""
-    global _access_token, _token_expires_at
+    """POST to Strava token endpoint, return fresh access_token.
+    Also stores the new refresh_token from the response (Strava rotates it).
+    """
+    global _access_token, _token_expires_at, _current_refresh_token
 
     if _access_token and time.time() < _token_expires_at - 60:
         return _access_token
@@ -31,15 +33,47 @@ def refresh_access_token(client_id: str, client_secret: str, refresh_token: str)
     data = resp.json()
     _access_token = data["access_token"]
     _token_expires_at = data["expires_at"]
+
+    # Strava rotates refresh tokens — persist the new one
+    new_refresh = data.get("refresh_token")
+    if new_refresh and new_refresh != refresh_token:
+        _current_refresh_token = new_refresh
+        try:
+            from db import get_connection, set_sync_state
+            conn = get_connection()
+            set_sync_state(conn, "strava_refresh_token", new_refresh)
+            print(f"[strava] Refresh token rotated and persisted")
+        except Exception as e:
+            print(f"[strava] WARNING: Could not persist new refresh token: {e}")
+
     return _access_token
 
 
+# Track the latest refresh token
+_current_refresh_token = None
+
+
 def _get_token() -> str:
-    """Get a valid access token from env vars."""
+    """Get a valid access token, using persisted refresh token if available."""
+    global _current_refresh_token
+
+    # Prefer DB-stored refresh token over env var (Strava rotates them)
+    refresh_token = _current_refresh_token or os.environ["STRAVA_REFRESH_TOKEN"]
+    if not _current_refresh_token:
+        try:
+            from db import get_connection, get_sync_state
+            conn = get_connection()
+            stored = get_sync_state(conn, "strava_refresh_token")
+            if stored:
+                refresh_token = stored
+                _current_refresh_token = stored
+        except Exception:
+            pass
+
     return refresh_access_token(
         os.environ["STRAVA_CLIENT_ID"],
         os.environ["STRAVA_CLIENT_SECRET"],
-        os.environ["STRAVA_REFRESH_TOKEN"],
+        refresh_token,
     )
 
 
@@ -73,6 +107,20 @@ def fetch_recent_activities(access_token: str, after_epoch: int) -> list:
     return all_activities
 
 
+def fetch_activity_detail(access_token: str, activity_id: int) -> dict:
+    """GET /activities/{id} — returns full detail including calories, HR, suffer_score."""
+    headers = {"Authorization": f"Bearer {access_token}"}
+    resp = requests.get(
+        f"{API_BASE}/activities/{activity_id}",
+        headers=headers,
+        timeout=15,
+    )
+    if resp.status_code == 404:
+        return {}
+    resp.raise_for_status()
+    return resp.json()
+
+
 def fetch_activity_streams(access_token: str, activity_id: int) -> dict:
     """GET /activities/{id}/streams for HR, power, cadence, speed, altitude, latlng."""
     headers = {"Authorization": f"Bearer {access_token}"}
@@ -95,19 +143,21 @@ def fetch_activity_streams(access_token: str, activity_id: int) -> dict:
     return streams
 
 
-def _parse_activity(raw: dict) -> dict:
-    """Convert Strava API activity to our DB format."""
-    # Detect device from device_name or type
+def _detect_device(raw: dict) -> str:
+    """Detect recording device from Strava activity metadata."""
     device_name = raw.get("device_name", "").lower()
     if "karoo" in device_name:
-        device = "karoo"
+        return "karoo"
     elif "watch" in device_name or "apple" in device_name:
-        device = "watch"
+        return "watch"
     elif raw.get("trainer", False) or "zwift" in raw.get("name", "").lower():
-        device = "zwift"
-    else:
-        device = "unknown"
+        return "zwift"
+    return "unknown"
 
+
+def _parse_activity(raw: dict) -> dict:
+    """Convert Strava API activity (summary or detail) to our DB format."""
+    device = _detect_device(raw)
     return {
         "strava_id": raw["id"],
         "name": raw.get("name", ""),
@@ -125,6 +175,36 @@ def _parse_activity(raw: dict) -> dict:
         "suffer_score": raw.get("suffer_score"),
         "device": device,
     }
+
+
+def _merge_detail(summary: dict, detail: dict) -> dict:
+    """Enrich summary data with detail fields.
+    Karoo calories always win. For other devices, fill gaps only.
+    """
+    if not detail:
+        return summary
+    merged = dict(summary)
+    device = summary.get("device", "unknown")
+
+    # Calories: Karoo data is from FIT file (accurate) — always prefer it.
+    # For other devices, use detail calories only if summary had none.
+    detail_calories = detail.get("calories")
+    if detail_calories:
+        if device == "karoo" or not merged.get("calories"):
+            merged["calories"] = detail_calories
+
+    # Fill other gaps from detail
+    for field in ("average_heartrate", "max_heartrate", "suffer_score"):
+        detail_val = detail.get(field)
+        db_field = {
+            "average_heartrate": "avg_hr",
+            "max_heartrate": "max_hr",
+            "suffer_score": "suffer_score",
+        }[field]
+        if detail_val and not merged.get(db_field):
+            merged[db_field] = detail_val
+
+    return merged
 
 
 def _parse_streams(raw_streams: dict) -> list:
@@ -167,6 +247,12 @@ def sync_activities(conn, after_epoch: int = None):
     latest_epoch = after_epoch
     for raw in activities:
         data = _parse_activity(raw)
+
+        # Fetch detailed activity for calories, HR, suffer_score
+        time.sleep(1.0)
+        detail = fetch_activity_detail(token, raw["id"])
+        data = _merge_detail(data, detail)
+
         activity_id = upsert_activity(conn, data)
 
         # Fetch streams with rate limiting
@@ -175,8 +261,8 @@ def sync_activities(conn, after_epoch: int = None):
         streams = _parse_streams(raw_streams)
         upsert_streams(conn, activity_id, streams)
 
-        # Track latest activity time
-        start = raw.get("start_date_local", raw.get("start_date", ""))
+        # Track latest activity time (use UTC start_date, not local)
+        start = raw.get("start_date", "")
         if start:
             try:
                 dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
