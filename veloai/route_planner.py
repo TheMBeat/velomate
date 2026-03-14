@@ -1,0 +1,245 @@
+"""Route planner — generates a real cycling GPX route and uploads it to Komoot."""
+
+import re
+import sys
+from datetime import datetime, timedelta
+
+
+# Surface type → Komoot sport mapping (new planner URL format, verified 2026-03)
+KOMOOT_SPORTS = {
+    "road":   "racebike",
+    "gravel": "mtb_easy",
+    "mtb":    "mtb",
+}
+
+# Default avg speeds (km/h) when no ride history available
+DEFAULT_SPEEDS = {"road": 27, "gravel": 22, "mtb": 17}
+
+# Surface multipliers against overall outdoor avg speed
+SURFACE_MULTIPLIERS = {"road": 1.1, "gravel": 0.85, "mtb": 0.7}
+
+
+def parse_duration(duration_str: str) -> object:
+    """Parse duration string to minutes. Supports '2h', '1h30m', '90min', '1:30'."""
+    if not duration_str:
+        return None
+    s = duration_str.lower().strip()
+
+    match = re.match(r'^(?:(\d+)h)?(?:(\d+)m(?:in)?)?$', s)
+    if match and (match.group(1) or match.group(2)):
+        hours = int(match.group(1) or 0)
+        minutes = int(match.group(2) or 0)
+        return hours * 60 + minutes
+
+    match = re.match(r'^(\d+)min$', s)
+    if match:
+        return int(match.group(1))
+
+    match = re.match(r'^(\d+):(\d{2})$', s)
+    if match:
+        return int(match.group(1)) * 60 + int(match.group(2))
+
+    return None
+
+
+def resolve_date(date_str: str) -> object:
+    """Resolve date string to YYYY-MM-DD."""
+    if not date_str:
+        return None
+    s = date_str.lower().strip()
+    today = datetime.now().date()
+
+    if s == "today":
+        return today.isoformat()
+    elif s == "tomorrow":
+        return (today + timedelta(days=1)).isoformat()
+
+    day_names = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+    if s in day_names:
+        target_day = day_names.index(s)
+        days_ahead = (target_day - today.weekday()) % 7
+        if days_ahead == 0:
+            days_ahead = 7
+        return (today + timedelta(days=days_ahead)).isoformat()
+
+    try:
+        datetime.strptime(s, "%Y-%m-%d")
+        return s
+    except ValueError:
+        pass
+
+    return None
+
+
+def estimate_distance(duration_min: int, surface: str, avg_speed: object) -> float:
+    """Estimate route distance (km) from duration and speed."""
+    if avg_speed:
+        speed = float(avg_speed) * SURFACE_MULTIPLIERS.get(surface, 0.85)
+    else:
+        speed = DEFAULT_SPEEDS.get(surface, 22)
+    return round(duration_min / 60 * speed, 1)
+
+
+def adjust_for_fitness(distance_km: float, tsb: object) -> object:
+    """Adjust distance based on TSB. Returns (adjusted_distance, note)."""
+    if tsb is None:
+        return distance_km, None
+    tsb = float(tsb)
+    if tsb > 10:
+        return distance_km, "fresh (TSB +{:.0f}) — good day to push".format(tsb)
+    elif tsb > -10:
+        return distance_km, "neutral (TSB {:+.0f})".format(tsb)
+    else:
+        adjusted = round(distance_km * 0.8, 1)
+        return adjusted, "fatigued (TSB {:.0f}) — reduced to {}km".format(tsb, adjusted)
+
+
+def format_weather(day: dict) -> str:
+    """Format weather for a single day."""
+    parts = [day["weather"]]
+    parts.append(f"{day['temp_min']:.0f}-{day['temp_max']:.0f}°C")
+    parts.append(f"wind {day['wind']:.0f} km/h")
+    if day["precip"] > 0:
+        parts.append(f"rain {day['precip']:.1f}mm")
+    return ", ".join(parts)
+
+
+def _upload_to_komoot(gpx_path: str, surface: str, name: str) -> object:
+    """Upload GPX to Komoot via komPYoot. Returns tour URL or None."""
+    try:
+        from komPYoot.api import API, Sport
+        from veloai.keychain import get as keychain_get
+
+        creds = keychain_get("openclaw/komoot")
+        api = API()
+        api.login(creds["email"], creds["password"])
+
+        sport_map = {
+            "road":   Sport.ROAD_CYCLING,
+            "gravel": Sport.GRAVEL_BIKING,
+            "mtb":    Sport.MT_BIKING,
+        }
+        sport = sport_map.get(surface, Sport.GRAVEL_BIKING)
+
+        ok = api.upload_tour_gpx(sport, gpx_path)
+        if ok:
+            # Get the most recently uploaded tour
+            tours = api.get_user_tours_list()
+            if tours:
+                latest = tours[0]
+                tour_id = latest.get("id") if isinstance(latest, dict) else getattr(latest, "id", None)
+                if tour_id:
+                    return f"https://www.komoot.com/tour/{tour_id}"
+            return "https://www.komoot.com/user/tours"
+    except Exception as e:
+        print(f"  Komoot upload failed: {e}", file=sys.stderr)
+    return None
+
+
+def plan(duration_str: str, surface: str = "gravel", loop: bool = True,
+         waypoints_str: str = None, date_str: str = "tomorrow",
+         home_lat: float = 38.69, home_lng: float = -9.32) -> str:
+    """Generate a real cycling route, upload to Komoot, return summary."""
+
+    # Parse duration
+    duration_min = parse_duration(duration_str)
+    if not duration_min:
+        return f"Error: could not parse duration '{duration_str}'. Use format like '2h', '1h30m', '90min'"
+
+    ride_date = resolve_date(date_str)
+
+    # Get fitness + avg speed from DB
+    avg_speed = None
+    fitness = {}
+    try:
+        from veloai.db import get_connection, get_latest_fitness, get_avg_speed
+        conn = get_connection()
+        if conn:
+            try:
+                avg_speed = get_avg_speed(conn)
+                fitness = get_latest_fitness(conn)
+            finally:
+                conn.close()
+    except Exception as e:
+        print(f"  DB unavailable ({e}), using defaults", file=sys.stderr)
+
+    # Estimate target distance
+    distance_km = estimate_distance(duration_min, surface, avg_speed)
+    distance_km, fitness_note = adjust_for_fitness(distance_km, fitness.get("tsb"))
+
+    # Weather check
+    weather_day = None
+    if ride_date:
+        try:
+            from veloai import weather
+            forecast = weather.fetch_forecast(home_lat, home_lng)
+            for day in forecast:
+                if day["date"] == ride_date:
+                    weather_day = day
+                    break
+        except Exception:
+            pass
+
+    # Geocode waypoints (if provided)
+    waypoint_names = []
+    valhalla_waypoints = []
+    if waypoints_str:
+        from veloai.geocode import geocode_many
+        places = [p.strip() for p in waypoints_str.split(",")]
+        geocoded = geocode_many(places, home_lat, home_lng)
+        waypoint_names = [g["display_name"].split(",")[0] for g in geocoded]
+        valhalla_waypoints = [{"lat": g["lat"], "lon": g["lng"]} for g in geocoded]
+
+    # Generate real GPX route via Valhalla
+    route_name = f"VeloAI {duration_min // 60}h{duration_min % 60:02d}m {surface.title()}"
+    if waypoint_names:
+        route_name += " via " + ", ".join(waypoint_names)
+
+    print(f"  Generating {distance_km:.0f}km {surface} route via Valhalla...", file=sys.stderr)
+
+    from veloai.route_generator import generate
+    result = generate(
+        start_lat=home_lat,
+        start_lng=home_lng,
+        target_km=distance_km,
+        surface=surface,
+        name=route_name,
+        waypoints=valhalla_waypoints if valhalla_waypoints else None,
+    )
+
+    if "error" in result:
+        return f"Route generation failed: {result['error']}"
+
+    gpx_path = result["gpx_path"]
+    actual_km = result["actual_km"]
+    print(f"  GPX generated: {actual_km:.1f}km, {len(result['coords'])} points", file=sys.stderr)
+
+    # Upload to Komoot
+    print(f"  Uploading to Komoot...", file=sys.stderr)
+    komoot_url = _upload_to_komoot(gpx_path, surface, route_name)
+
+    # Build output
+    lines = []
+    lines.append(f"🗺 *{route_name}*")
+    lines.append(f"  📏 {actual_km:.0f} km")
+
+    if weather_day:
+        lines.append(f"  🌤 {format_weather(weather_day)}")
+        if weather_day["wind"] > 30:
+            lines.append(f"  ⚠️ High wind — route goes inland where possible")
+        if weather_day["precip"] > 5:
+            lines.append(f"  ⚠️ Rain expected — check conditions")
+        if weather_day["temp_max"] > 35:
+            lines.append(f"  ⚠️ Heat warning — ride early")
+
+    if fitness_note:
+        lines.append(f"  💪 {fitness_note}")
+
+    if komoot_url:
+        lines.append(f"  🔗 {komoot_url}")
+        lines.append(f"  Route is in Komoot — syncing to Karoo now")
+    else:
+        lines.append(f"  💾 GPX saved: {gpx_path}")
+        lines.append(f"  Import manually: Komoot → + → Import GPX")
+
+    return "\n".join(lines)
