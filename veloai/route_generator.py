@@ -37,7 +37,7 @@ def _loop_waypoints(lat: float, lng: float, target_km: float, num_points: int = 
     Adds a small random bias to avoid out-and-back on the same road.
     """
     # Circumference ≈ target_km, so radius = target_km / (2π)
-    # Add 20% to account for roads not being straight-line circles
+    # Reduce by 20% because road routing adds distance vs straight-line circles
     radius_km = (target_km / (2 * math.pi)) * 0.8
     radius_lat = radius_km / 111.0          # degrees latitude per km
     radius_lng = radius_km / (111.0 * math.cos(math.radians(lat)))
@@ -57,11 +57,12 @@ def _decode_polyline6(encoded: str) -> list:
     index = 0
     lat = 0
     lng = 0
-    while index < len(encoded):
+    length = len(encoded)
+    while index < length:
         for is_lng in (False, True):
             result = 0
             shift = 0
-            while True:
+            while index < length:
                 b = ord(encoded[index]) - 63
                 index += 1
                 result |= (b & 0x1F) << shift
@@ -108,6 +109,7 @@ def generate(
     name: str = None,
     output_path: str = None,
     waypoints: list = None,
+    safety: float = 0.5,
 ) -> dict:
     """Generate a cycling loop GPX route.
 
@@ -128,6 +130,11 @@ def generate(
         costing_options = ROAD_CYCLING_OPTIONS.copy()
     elif surface == "gravel":
         costing_options = GRAVEL_CYCLING_OPTIONS.copy()
+
+    # Safety: 0.0 = max safety (avoid busy roads), 1.0 = fastest (use all roads)
+    # Maps inversely to Valhalla's use_roads: safety 1.0 → use_roads 0.0
+    if costing_options:
+        costing_options["use_roads"] = round(1.0 - safety, 1)
 
     # Build loop waypoints — use provided waypoints or auto-generate a circular loop
     if waypoints:

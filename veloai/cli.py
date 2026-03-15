@@ -2,19 +2,20 @@ import argparse
 import sys
 import warnings
 
-from veloai import komoot, weather, planner
+from veloai import weather, planner
+from veloai.config import load as load_config
 
 warnings.filterwarnings("ignore")
 
-LOCATION = {"lat": 38.69, "lon": -9.32, "name": "São Domingos de Rana"}
-
 
 def cmd_recommend(args):
-    """Weekly ride recommendation (existing behavior)."""
-    fitness = {}
-    tours = None
+    """Weekly ride recommendation based on fitness + weather + past routes."""
+    cfg = load_config()
+    home = cfg["home"]
 
-    # Try DB first
+    fitness = {}
+    tours = []
+
     try:
         from veloai.db import get_connection, get_latest_fitness, get_routes
         conn = get_connection()
@@ -22,27 +23,23 @@ def cmd_recommend(args):
             try:
                 print("Connected to VeloAI DB", file=sys.stderr)
                 fitness = get_latest_fitness(conn)
-                db_routes = get_routes(conn)
-                if db_routes:
-                    tours = db_routes
-                    print(f"  → {len(tours)} routes from DB", file=sys.stderr)
+                tours = get_routes(conn) or []
+                print(f"  → {len(tours)} routes from DB", file=sys.stderr)
                 if fitness:
                     print(f"  → Fitness: CTL={fitness.get('ctl', '?')}, ATL={fitness.get('atl', '?')}, TSB={fitness.get('tsb', '?')}", file=sys.stderr)
             finally:
                 conn.close()
         else:
-            print("DB unavailable, falling back to Komoot API", file=sys.stderr)
+            print("DB unavailable", file=sys.stderr)
     except Exception as e:
-        print(f"DB error ({e}), falling back to Komoot API", file=sys.stderr)
+        print(f"DB error: {e}", file=sys.stderr)
 
-    # Fall back to Komoot API if no DB routes
-    if tours is None:
-        print("Fetching Komoot tours...", file=sys.stderr)
-        tours = komoot.fetch_tours()
-        print(f"  → {len(tours)} cycling tours", file=sys.stderr)
+    if not tours:
+        print("No routes found in database — run the ingestor first", file=sys.stderr)
+        return
 
     print("Fetching weather forecast...", file=sys.stderr)
-    days = weather.fetch_forecast(LOCATION["lat"], LOCATION["lon"])
+    days = weather.fetch_forecast(home["lat"], home["lng"])
 
     if not days:
         print("Weather unavailable — skipping recommendation", file=sys.stderr)
@@ -52,8 +49,17 @@ def cmd_recommend(args):
 
 
 def cmd_plan(args):
-    """Plan a route and open in Komoot."""
+    """Plan a route and upload to Komoot."""
     from veloai.route_planner import plan
+
+    cfg = load_config()
+    home = cfg["home"]
+
+    if args.start:
+        parts = args.start.split(",")
+        home_lat, home_lng = float(parts[0]), float(parts[1])
+    else:
+        home_lat, home_lng = home["lat"], home["lng"]
 
     result = plan(
         duration_str=args.duration,
@@ -61,8 +67,11 @@ def cmd_plan(args):
         loop=args.loop,
         waypoints_str=args.waypoints,
         date_str=args.date,
-        home_lat=LOCATION["lat"],
-        home_lng=LOCATION["lon"],
+        time_str=args.time,
+        home_lat=home_lat,
+        home_lng=home_lng,
+        preference=args.preference,
+        safety=args.safety,
     )
     print(result)
 
@@ -82,14 +91,19 @@ def main():
     plan_parser.add_argument("--no-loop", action="store_false", dest="loop", help="One-way route")
     plan_parser.add_argument("--waypoints", "-w", default=None, help="Comma-separated place names to route through")
     plan_parser.add_argument("--date", default="tomorrow", help="When to ride (default: tomorrow)")
+    plan_parser.add_argument("--time", "-t", default=None, help="Start time (e.g. 14:00, 2pm, 9am)")
+    plan_parser.add_argument("--start", default=None, help="Start location as 'lat,lng' (default: from config)")
+    plan_parser.add_argument("--preference", "-p", default="variety", choices=["variety", "comfort"], help="Route preference: variety (new roads) or comfort (familiar roads)")
+    plan_parser.add_argument("--safety", default=0.5, type=float, help="Safety level 0.0-1.0: 0=fastest, 0.5=balanced, 1.0=safest (default: 0.5)")
 
     args = parser.parse_args()
 
     if args.command == "plan":
         cmd_plan(args)
-    else:
-        # No subcommand → run existing recommendation (backward compatible)
+    elif args.command is None:
         cmd_recommend(args)
+    else:
+        parser.error(f"Unknown command: {args.command}")
 
 
 if __name__ == "__main__":

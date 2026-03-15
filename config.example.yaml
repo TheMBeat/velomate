@@ -1,0 +1,41 @@
+# VeloAI Configuration
+# Copy to ~/.config/veloai/config.yaml and edit with your values.
+#
+# All values can be overridden by environment variables.
+# Passwords support three methods: direct value, env var name, or shell command.
+
+home:
+  lat: 0.0            # Your home latitude (required)
+  lng: 0.0            # Your home longitude (required)
+  name: ""            # Display name for your location
+
+db:
+  host: localhost      # PostgreSQL host
+  port: 5432          # PostgreSQL port
+  name: veloai        # Database name
+  user: veloai        # Database user
+  password: ""        # Direct password, or use password_env/password_cmd below
+  # password_env: VELOAI_DB_PASS         # Read password from this env var
+  # password_cmd: "vault read -field=password secret/veloai/db"  # Shell command
+
+strava:
+  client_id: ""
+  client_secret: ""
+  refresh_token: ""
+
+defaults:
+  surface: gravel     # road, gravel, or mtb
+  loop: true          # Round-trip routes by default
+
+fitness:
+  max_hr: 0           # Your max heart rate (0 = auto-estimate from data)
+  ftp: 0              # Functional Threshold Power in watts (0 = auto-estimate)
+
+# Roads/areas to avoid when planning routes
+# Each entry is a lat,lng point with a radius in meters
+# The route planner will avoid placing waypoints near these areas
+avoid:
+  # - lat: 38.75
+  #   lng: -9.33
+  #   radius: 500
+  #   reason: "busy intersection"

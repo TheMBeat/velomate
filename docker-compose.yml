@@ -28,8 +28,8 @@ services:
       STRAVA_CLIENT_ID: ${STRAVA_CLIENT_ID}
       STRAVA_CLIENT_SECRET: ${STRAVA_CLIENT_SECRET}
       STRAVA_REFRESH_TOKEN: ${STRAVA_REFRESH_TOKEN}
-      KOMOOT_EMAIL: ${KOMOOT_EMAIL}
-      KOMOOT_PASSWORD: ${KOMOOT_PASSWORD}
+      VELOAI_MAX_HR: ${VELOAI_MAX_HR:-0}
+      VELOAI_FTP: ${VELOAI_FTP:-0}
       POLL_INTERVAL_MINUTES: 10
       PYTHONUNBUFFERED: "1"
     depends_on:
@@ -39,7 +39,7 @@ services:
 
   veloai-grafana:
     container_name: veloai-grafana
-    image: grafana/grafana:12.0.0
+    image: grafana/grafana:12.4.0
     ports:
       - "3021:3000"
     volumes:
@@ -48,7 +48,7 @@ services:
       - ./grafana/dashboards:/etc/grafana/dashboards
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD}
-      GF_SERVER_ROOT_URL: https://veloai.mrmartian.in/
+      GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL:-http://localhost:3021/}
       GF_SERVER_SERVE_FROM_SUB_PATH: "false"
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     depends_on:

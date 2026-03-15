@@ -1,10 +1,11 @@
 """CTL/ATL/TSB fitness calculator."""
 
+import os
 from datetime import timedelta
 
 
 DEFAULT_THRESHOLD_HR = 170
-DEFAULT_FTP = 150  # Estimated FTP (watts) for recreational cyclist
+DEFAULT_FTP = 150  # Estimated FTP (watts) — fallback only
 
 
 def calculate_tss(duration_s: int, avg_hr: int, threshold_hr: int) -> float:
@@ -40,7 +41,37 @@ def estimate_threshold_hr(conn) -> int:
 
 
 def estimate_ftp(conn) -> int:
-    """Return estimated FTP from 95th percentile of avg_power, or default."""
+    """Estimate FTP from best 20-minute rolling average power in last 90 days.
+    FTP ≈ best 20-min power × 0.95 (standard protocol).
+    Falls back to 95th percentile of avg_power if no stream data available.
+    """
+    # Try rolling 20-min best from stream data (last 90 days)
+    with conn.cursor() as cur:
+        cur.execute("""
+            WITH recent_activities AS (
+                SELECT id FROM activities
+                WHERE date >= CURRENT_DATE - interval '90 days'
+                  AND avg_power IS NOT NULL AND avg_power > 0
+            ),
+            rolling AS (
+                SELECT
+                    s.activity_id,
+                    AVG(s.power) OVER (
+                        PARTITION BY s.activity_id
+                        ORDER BY s.time_offset
+                        ROWS BETWEEN 1199 PRECEDING AND CURRENT ROW
+                    ) AS avg_20min
+                FROM activity_streams s
+                JOIN recent_activities a ON a.id = s.activity_id
+                WHERE s.power IS NOT NULL AND s.power > 0
+            )
+            SELECT ROUND(MAX(avg_20min) * 0.95) FROM rolling
+        """)
+        row = cur.fetchone()
+        if row and row[0] and row[0] > 0:
+            return int(row[0])
+
+    # Fallback: 95th percentile of avg_power from activities
     with conn.cursor() as cur:
         cur.execute("""
             SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY avg_power)
@@ -64,9 +95,31 @@ def recalculate_fitness(conn):
     """
     from db import upsert_athlete_stats
 
-    threshold_hr = estimate_threshold_hr(conn)
-    ftp = estimate_ftp(conn)
-    print(f"[fitness] Threshold HR: {threshold_hr}, Estimated FTP: {ftp}W")
+    # Use configured values if set, otherwise auto-estimate from data
+    env_max_hr = os.environ.get("VELOAI_MAX_HR", "")
+    env_ftp = os.environ.get("VELOAI_FTP", "")
+
+    try:
+        hr_val = int(env_max_hr) if env_max_hr else 0
+    except ValueError:
+        hr_val = 0
+    if hr_val > 0:
+        threshold_hr = hr_val
+        print(f"[fitness] Using configured max HR: {threshold_hr}")
+    else:
+        threshold_hr = estimate_threshold_hr(conn)
+        print(f"[fitness] Auto-estimated threshold HR: {threshold_hr}")
+
+    try:
+        ftp_val = int(env_ftp) if env_ftp else 0
+    except ValueError:
+        ftp_val = 0
+    if ftp_val > 0:
+        ftp = ftp_val
+        print(f"[fitness] Using configured FTP: {ftp}W")
+    else:
+        ftp = estimate_ftp(conn)
+        print(f"[fitness] Auto-estimated FTP: {ftp}W (rolling 90-day best 20min × 0.95)")
 
     # Store per-activity TSS
     with conn.cursor() as cur:
@@ -87,10 +140,10 @@ def recalculate_fitness(conn):
         with conn.cursor() as cur:
             cur.execute("UPDATE activities SET tss = %s WHERE id = %s", (round(tss, 1), act_id))
 
-    # Get all activities ordered by date (include power data)
+    # Read back stored TSS + distance/elevation (reuse values just written above)
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT date::date, duration_s, avg_hr, avg_power, distance_m, elevation_m
+            SELECT date::date, COALESCE(tss, 0), distance_m, elevation_m
             FROM activities
             WHERE date IS NOT NULL
             ORDER BY date
@@ -101,17 +154,11 @@ def recalculate_fitness(conn):
         print("[fitness] No activities found, skipping")
         return
 
-    # Build daily TSS map — prefer power-based TSS, fall back to HR-based
+    # Build daily aggregates from stored TSS
     daily_tss = {}
     daily_distance = {}
     daily_elevation = {}
-    for date, duration_s, avg_hr, avg_power, distance_m, elevation_m in rows:
-        if avg_power and avg_power > 0:
-            tss = calculate_tss_power(duration_s, avg_power, ftp)
-        elif avg_hr and avg_hr > 0:
-            tss = calculate_tss(duration_s, avg_hr, threshold_hr)
-        else:
-            tss = 0
+    for date, tss, distance_m, elevation_m in rows:
         daily_tss[date] = daily_tss.get(date, 0) + tss
         daily_distance[date] = daily_distance.get(date, 0) + (distance_m or 0)
         daily_elevation[date] = daily_elevation.get(date, 0) + (elevation_m or 0)

@@ -118,6 +118,9 @@ def find_duplicate_by_distance(conn, date_str: str, distance_m: float, tolerance
     """
     if not distance_m or distance_m <= 0:
         return None
+    # Skip dedup for very short rides (<5km) — too easy to false-match commutes
+    if distance_m < 5000:
+        return None
     with conn.cursor() as cur:
         cur.execute("""
             SELECT id, strava_id, device, distance_m, avg_hr, avg_power
@@ -129,7 +132,7 @@ def find_duplicate_by_distance(conn, date_str: str, distance_m: float, tolerance
         return cur.fetchone()
 
 
-def find_duplicate(conn, date_str: str, duration_s: int, tolerance_seconds: int = 300) -> int:
+def find_duplicate(conn, date_str: str, duration_s: int, tolerance_seconds: int = 300) -> tuple | None:
     """Find an existing activity that started within tolerance of date_str
     and has a similar duration. Returns activity id or None.
     Used to detect cross-device duplicates (Zwift + Watch recording same session).
@@ -144,23 +147,47 @@ def find_duplicate(conn, date_str: str, duration_s: int, tolerance_seconds: int 
         return cur.fetchone()
 
 
+def _data_richness(data: dict) -> int:
+    """Score an activity record by data richness. Higher = more useful data."""
+    score = 0
+    if data.get("avg_power"):
+        score += 3  # power is the most valuable metric
+    if data.get("avg_hr"):
+        score += 2
+    if data.get("distance_m") and data["distance_m"] > 0:
+        score += 1
+    if data.get("avg_cadence"):
+        score += 1
+    if data.get("calories"):
+        score += 1
+    if data.get("elevation_m") and data["elevation_m"] > 0:
+        score += 1
+    return score
+
+
 def merge_activity_data(existing: tuple, new_data: dict) -> dict:
-    """Merge two activity records, preferring richer data.
+    """Merge two activity records, preferring the one with richer data.
     existing = (id, strava_id, device, distance_m, avg_hr, avg_power)
-    Priority: zwift > gps/outdoor > watch
+    Uses data richness scoring — whichever record has more useful fields wins.
     """
     ex_id, ex_strava_id, ex_device, ex_distance, ex_hr, ex_power = existing
-    device_priority = {"karoo": 4, "unknown": 3, "zwift": 3, "watch": 1}
-    new_priority = device_priority.get(new_data.get("device", ""), 1)
-    ex_priority = device_priority.get(ex_device or "", 1)
+    ex_richness = sum([
+        3 if ex_power else 0,
+        2 if ex_hr else 0,
+        1 if ex_distance and ex_distance > 0 else 0,
+    ])
+    new_richness = _data_richness(new_data)
 
     # Keep richer record as base, fill gaps from the other
-    if new_priority >= ex_priority:
+    if new_richness >= ex_richness:
         merged = dict(new_data)
+        # Fill any missing fields from existing record
         if not merged.get("avg_hr") and ex_hr:
             merged["avg_hr"] = ex_hr
         if not merged.get("avg_power") and ex_power:
             merged["avg_power"] = ex_power
+        if not merged.get("distance_m") and ex_distance:
+            merged["distance_m"] = ex_distance
     else:
         # Existing is richer — just fill gaps, don't replace base
         merged = dict(new_data)
@@ -224,13 +251,23 @@ def upsert_activity(conn, data: dict) -> int:
                 return ex_id
             else:
                 # Atomic merge: disable autocommit so DELETE + INSERT are one transaction
-                print(f"  [dedup] Merging {data['name']} with existing activity {ex_id} (device priority)")
+                print(f"  [dedup] Merging {data['name']} with existing activity {ex_id} (richness {new_richness} vs {ex_richness})")
                 conn.autocommit = False
                 try:
                     with conn.cursor() as cur:
+                        # Reassign streams to survive the DELETE CASCADE
+                        cur.execute("UPDATE activity_streams SET activity_id = -1 WHERE activity_id = %s", (ex_id,))
                         cur.execute("DELETE FROM activities WHERE id = %s", (ex_id,))
                     data = merged
                     activity_id = _do_insert(conn, data, now)
+                    # Reattach preserved streams to the new activity (if it has none)
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT COUNT(*) FROM activity_streams WHERE activity_id = %s", (activity_id,))
+                        new_has_streams = cur.fetchone()[0] > 0
+                        if not new_has_streams:
+                            cur.execute("UPDATE activity_streams SET activity_id = %s WHERE activity_id = -1", (activity_id,))
+                        else:
+                            cur.execute("DELETE FROM activity_streams WHERE activity_id = -1")
                     conn.commit()
                     return activity_id
                 except Exception:

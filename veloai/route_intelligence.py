@@ -1,0 +1,728 @@
+"""Route intelligence — smart waypoint selection using OSM POIs and Strava segments."""
+
+import requests
+
+
+OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+KOMOOT_TILE_URL = "https://api.main.komoot.net/v007/tiles/discover/highlights/{sport}/{z}/{x}/{y}.vector.pbf"
+
+# Komoot sport mapping for tile API
+KOMOOT_TILE_SPORTS = {"road": "racebike", "gravel": "touringbicycle", "mtb": "mtb"}
+
+
+def get_pois(lat: float, lng: float, radius_km: float, poi_types: list | None = None) -> list[dict]:
+    """Query OSM Overpass API for cycling-relevant POIs within radius.
+    Returns list of {lat, lng, name, type}.
+    """
+    if poi_types is None:
+        poi_types = [
+            'tourism=viewpoint',
+            'amenity=cafe',
+            'amenity=drinking_water',
+            'natural=peak',
+            'amenity=bicycle_repair_station',
+        ]
+
+    radius_m = int(radius_km * 1000)
+    union_parts = []
+    for pt in poi_types:
+        key, val = pt.split('=', 1)
+        union_parts.append(f'node["{key}"="{val}"](around:{radius_m},{lat},{lng});')
+
+    query = f"""
+    [out:json][timeout:10];
+    (
+      {chr(10).join(union_parts)}
+    );
+    out body;
+    """
+
+    try:
+        resp = requests.post(OVERPASS_URL, data={"data": query}, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+    except (requests.RequestException, ValueError) as e:
+        print(f"  [intelligence] Overpass API error: {e}")
+        return []
+
+    results = []
+    for el in data.get("elements", []):
+        if "lat" in el and "lon" in el:
+            tags = el.get("tags", {})
+            name = tags.get("name", "")
+            poi_type = next(
+                (f"{k}={v}" for k, v in tags.items() if f"{k}={v}" in poi_types),
+                "unknown"
+            )
+            results.append({
+                "lat": el["lat"],
+                "lng": el["lon"],
+                "name": name or poi_type.split("=")[1].replace("_", " ").title(),
+                "type": poi_type,
+            })
+
+    return results
+
+
+def get_strava_segments(lat: float, lng: float, radius_km: float, access_token: str) -> list[dict]:
+    """Query Strava API for popular cycling segments near a location.
+    Returns list of {lat, lng, name, athlete_count}.
+    """
+    # Bounding box from center + radius
+    dlat = radius_km / 111.0
+    dlng = radius_km / (111.0 * 0.75)  # rough cos correction
+    bounds = f"{lat - dlat},{lng - dlng},{lat + dlat},{lng + dlng}"
+
+    try:
+        resp = requests.get(
+            "https://www.strava.com/api/v3/segments/explore",
+            params={"bounds": bounds, "activity_type": "riding"},
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except (requests.RequestException, ValueError) as e:
+        print(f"  [intelligence] Strava segments error: {e}")
+        return []
+
+    results = []
+    for seg in data.get("segments", []):
+        start = seg.get("start_latlng", [0, 0])
+        results.append({
+            "lat": start[0],
+            "lng": start[1],
+            "name": seg.get("name", ""),
+            "athlete_count": seg.get("athlete_count", 0),
+        })
+
+    # Sort by popularity
+    results.sort(key=lambda s: s["athlete_count"], reverse=True)
+    return results
+
+
+def get_komoot_highlights(lat: float, lng: float, radius_km: float, surface: str = "gravel") -> list[dict]:
+    """Fetch Komoot community highlights via vector tiles (no auth needed).
+    Returns list of {lat, lng, name, category}.
+    """
+    import math
+
+    try:
+        import mapbox_vector_tile
+    except ImportError:
+        print("  [intelligence] mapbox-vector-tile not installed — skipping Komoot highlights")
+        return []
+
+    sport = KOMOOT_TILE_SPORTS.get(surface, "touringbicycle")
+    zoom = 11  # good balance of coverage and detail
+
+    # Convert center lat/lng to tile coordinates
+    n = 2 ** zoom
+    cx = int((lng + 180) / 360 * n)
+    cy = int((1 - math.log(math.tan(math.radians(lat)) + 1 / math.cos(math.radians(lat))) / math.pi) / 2 * n)
+
+    # Fetch tiles in a grid around center (3x3 for ~30km coverage at z11)
+    tiles_range = max(1, int(radius_km / 15))  # ~15km per tile at z11
+    highlights = []
+
+    for dx in range(-tiles_range, tiles_range + 1):
+        for dy in range(-tiles_range, tiles_range + 1):
+            x, y = cx + dx, cy + dy
+            url = KOMOOT_TILE_URL.format(sport=sport, z=zoom, x=x, y=y)
+            try:
+                resp = requests.get(url, timeout=10)
+                if resp.status_code == 200 and resp.content:
+                    tile = mapbox_vector_tile.decode(resp.content)
+                    for layer in tile.values():
+                        for f in layer.get("features", []):
+                            props = f.get("properties", {})
+                            name = props.get("name", "")
+                            if name:
+                                # Extract lat/lng from properties if available
+                                hlat = props.get("lat")
+                                hlng = props.get("lng")
+                                if hlat and hlng:
+                                    highlights.append({
+                                        "lat": float(hlat),
+                                        "lng": float(hlng),
+                                        "name": name,
+                                        "category": props.get("category", "unknown"),
+                                    })
+            except Exception:
+                continue
+
+    # Deduplicate by name
+    seen = set()
+    unique = []
+    for h in highlights:
+        if h["name"] not in seen:
+            seen.add(h["name"])
+            unique.append(h)
+
+    return unique
+
+
+def verify_surface(coords: list, expected_surface: str) -> dict:
+    """Check if a route's actual road surfaces match the requested surface type.
+
+    Samples points along the route, queries Overpass for road surface tags.
+    Returns {match_pct, surfaces: {surface: pct}, warning: str|None}.
+    """
+    if not coords or len(coords) < 10:
+        return {"match_pct": 100, "surfaces": {}, "warning": None}
+
+    # Sample every ~500m (roughly every 50th point at 1/sec, ~10m spacing)
+    step = max(1, len(coords) // 30)
+    samples = coords[::step][:30]  # max 30 samples
+
+    # Build Overpass query: find nearest road to each sample point
+    around_radius = 30  # meters
+    union_parts = []
+    for lat, lng in samples:
+        union_parts.append(f'way["highway"](around:{around_radius},{lat},{lng});')
+
+    query = f"""
+    [out:json][timeout:15];
+    (
+      {chr(10).join(union_parts)}
+    );
+    out tags;
+    """
+
+    try:
+        resp = requests.post(OVERPASS_URL, data={"data": query}, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
+    except (requests.RequestException, ValueError) as e:
+        print(f"  [intelligence] Surface verification failed: {e}")
+        return {"match_pct": 100, "surfaces": {}, "warning": None}
+
+    # Count surface types
+    surface_counts: dict[str, int] = {}
+    for el in data.get("elements", []):
+        tags = el.get("tags", {})
+        surface = tags.get("surface", "unknown")
+        surface_counts[surface] = surface_counts.get(surface, 0) + 1
+
+    total = sum(surface_counts.values())
+    if total == 0:
+        return {"match_pct": 100, "surfaces": {}, "warning": None}
+
+    # Calculate percentages
+    surfaces = {s: round(c / total * 100) for s, c in sorted(surface_counts.items(), key=lambda x: -x[1])}
+
+    # Determine match percentage based on expected surface
+    paved = {"asphalt", "concrete", "paving_stones", "sett", "paved"}
+    unpaved = {"gravel", "compacted", "fine_gravel", "dirt", "earth", "ground", "grass", "sand", "unpaved"}
+
+    if expected_surface == "road":
+        match_pct = sum(c for s, c in surface_counts.items() if s in paved) / total * 100
+    elif expected_surface == "gravel":
+        match_pct = sum(c for s, c in surface_counts.items() if s in unpaved) / total * 100
+    elif expected_surface == "mtb":
+        match_pct = sum(c for s, c in surface_counts.items() if s in unpaved or s in {"rock", "mud"}) / total * 100
+    else:
+        match_pct = 100
+
+    match_pct = round(match_pct)
+
+    # Generate warning if mismatch
+    warning = None
+    if match_pct < 50:
+        top_surface = max(surface_counts, key=surface_counts.get)
+        warning = f"Route is mostly {top_surface} ({surfaces.get(top_surface, 0)}%) — requested {expected_surface}"
+    elif match_pct < 75:
+        warning = f"Mixed surface: {', '.join(f'{s} {p}%' for s, p in list(surfaces.items())[:3])}"
+
+    return {"match_pct": match_pct, "surfaces": surfaces, "warning": warning}
+
+
+def score_scenic(coords: list) -> dict:
+    """Score a route's scenic value based on proximity to natural features.
+    Queries OSM for water, forest, coastline, parks, cliffs near the route.
+    Returns {scenic_score: 0-100, features: list[str]}.
+    """
+    if not coords or len(coords) < 10:
+        return {"scenic_score": 0, "features": []}
+
+    step = max(1, len(coords) // 15)
+    samples = coords[::step][:15]
+
+    around_radius = 200  # meters
+    scenic_tags = [
+        'node["natural"="water"]',
+        'way["natural"="water"]',
+        'way["natural"="coastline"]',
+        'way["landuse"="forest"]',
+        'way["natural"="wood"]',
+        'node["natural"="beach"]',
+        'way["leisure"="park"]',
+        'node["natural"="cliff"]',
+        'node["natural"="peak"]',
+    ]
+
+    union_parts = []
+    for lat, lng in samples:
+        for tag in scenic_tags:
+            union_parts.append(f'{tag}(around:{around_radius},{lat},{lng});')
+
+    query = f"""
+    [out:json][timeout:15];
+    (
+      {chr(10).join(union_parts)}
+    );
+    out tags;
+    """
+
+    try:
+        resp = requests.post(OVERPASS_URL, data={"data": query}, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
+    except (requests.RequestException, ValueError) as e:
+        print(f"  [intelligence] Scenic scoring failed: {e}")
+        return {"scenic_score": 0, "features": []}
+
+    feature_counts: dict[str, int] = {}
+    for el in data.get("elements", []):
+        tags = el.get("tags", {})
+        for key in ("natural", "landuse", "leisure"):
+            val = tags.get(key)
+            if val:
+                feature_counts[val] = feature_counts.get(val, 0) + 1
+
+    if not feature_counts:
+        return {"scenic_score": 0, "features": []}
+
+    # Score by feature variety and count
+    feature_scores = {"coastline": 15, "water": 12, "beach": 10, "cliff": 10,
+                      "peak": 8, "forest": 8, "wood": 8, "park": 6}
+    score = 0
+    for feat, count in feature_counts.items():
+        score += feature_scores.get(feat, 3) * min(count, 3)
+    score = min(100, score)
+
+    features = [f"{feat} ({count})" for feat, count in sorted(feature_counts.items(), key=lambda x: -x[1])[:5]]
+
+    return {"scenic_score": score, "features": features}
+
+
+def get_elevation_profile(coords: list) -> dict:
+    """Get elevation profile using Open Topo Data API.
+    Returns {total_climb: m, total_descent: m, max_gradient: %, profile: list}.
+    """
+    if not coords or len(coords) < 10:
+        return {"total_climb": 0, "total_descent": 0, "max_gradient": 0}
+
+    # Sample every ~200m (roughly every 20th point at 10m spacing)
+    step = max(1, len(coords) // 50)
+    samples = coords[::step][:50]
+
+    # Open Topo Data accepts pipe-separated lat,lng pairs
+    locations = "|".join(f"{lat},{lng}" for lat, lng in samples)
+
+    try:
+        resp = requests.get(
+            f"https://api.opentopodata.org/v1/eudem25m?locations={locations}",
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except (requests.RequestException, ValueError) as e:
+        print(f"  [intelligence] Elevation profile failed: {e}")
+        return {"total_climb": 0, "total_descent": 0, "max_gradient": 0}
+
+    elevations = []
+    for r in data.get("results", []):
+        elev = r.get("elevation")
+        if elev is not None:
+            elevations.append(elev)
+
+    if len(elevations) < 2:
+        return {"total_climb": 0, "total_descent": 0, "max_gradient": 0}
+
+    import math
+    total_climb = 0
+    total_descent = 0
+    max_gradient = 0
+
+    for i in range(1, len(elevations)):
+        diff = elevations[i] - elevations[i - 1]
+        # Approximate distance between samples
+        lat1, lng1 = samples[i - 1]
+        lat2, lng2 = samples[i]
+        dist_m = math.sqrt(((lat2 - lat1) * 111000) ** 2 + ((lng2 - lng1) * 85000) ** 2)
+
+        if diff > 0:
+            total_climb += diff
+        else:
+            total_descent += abs(diff)
+
+        if dist_m > 10:
+            gradient = abs(diff) / dist_m * 100
+            max_gradient = max(max_gradient, gradient)
+
+    return {
+        "total_climb": round(total_climb),
+        "total_descent": round(total_descent),
+        "max_gradient": round(max_gradient, 1),
+    }
+
+
+def find_cycling_trails(coords: list) -> list[str]:
+    """Find named cycling trail networks (EuroVelo, national routes) along the route.
+    Returns list of trail names.
+    """
+    if not coords or len(coords) < 10:
+        return []
+
+    step = max(1, len(coords) // 10)
+    samples = coords[::step][:10]
+
+    union_parts = []
+    for lat, lng in samples:
+        union_parts.append(f'relation["route"="bicycle"](around:100,{lat},{lng});')
+
+    query = f"""
+    [out:json][timeout:10];
+    (
+      {chr(10).join(union_parts)}
+    );
+    out tags;
+    """
+
+    try:
+        resp = requests.post(OVERPASS_URL, data={"data": query}, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+    except (requests.RequestException, ValueError):
+        return []
+
+    trails = set()
+    for el in data.get("elements", []):
+        tags = el.get("tags", {})
+        name = tags.get("name", "")
+        ref = tags.get("ref", "")
+        network = tags.get("network", "")
+        if name:
+            label = name
+            if ref:
+                label = f"{name} ({ref})"
+            trails.add(label)
+        elif ref:
+            trails.add(ref)
+
+    return sorted(trails)
+
+
+def score_cycling_safety(coords: list) -> dict:
+    """Score a route's cycling safety based on OSM infrastructure tags.
+
+    Samples points along the route, queries for bike lanes, speed limits,
+    and traffic calming. Returns {safety_score: 0-100, details: str}.
+    """
+    if not coords or len(coords) < 10:
+        return {"safety_score": 0, "details": ""}
+
+    step = max(1, len(coords) // 20)
+    samples = coords[::step][:20]
+
+    around_radius = 30
+    union_parts = []
+    for lat, lng in samples:
+        union_parts.append(f'way["highway"](around:{around_radius},{lat},{lng});')
+
+    query = f"""
+    [out:json][timeout:15];
+    (
+      {chr(10).join(union_parts)}
+    );
+    out tags;
+    """
+
+    try:
+        resp = requests.post(OVERPASS_URL, data={"data": query}, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
+    except (requests.RequestException, ValueError) as e:
+        print(f"  [intelligence] Safety scoring failed: {e}")
+        return {"safety_score": 0, "details": ""}
+
+    total = 0
+    has_bike_lane = 0
+    low_speed = 0
+    has_calming = 0
+    is_path = 0
+
+    for el in data.get("elements", []):
+        tags = el.get("tags", {})
+        total += 1
+
+        # Bike infrastructure
+        if any(tags.get(k) for k in ("cycleway", "cycleway:left", "cycleway:right", "cycleway:both")):
+            has_bike_lane += 1
+        elif tags.get("highway") in ("cycleway", "path", "track"):
+            is_path += 1
+
+        # Low speed
+        maxspeed = tags.get("maxspeed", "")
+        try:
+            if maxspeed and int(maxspeed) <= 30:
+                low_speed += 1
+        except ValueError:
+            pass
+
+        # Traffic calming
+        if tags.get("traffic_calming") or tags.get("highway") == "living_street":
+            has_calming += 1
+
+    if total == 0:
+        return {"safety_score": 0, "details": ""}
+
+    bike_pct = (has_bike_lane + is_path) / total * 100
+    slow_pct = low_speed / total * 100
+    calm_pct = has_calming / total * 100
+
+    # Score: 0-100 (higher = safer)
+    score = min(100, int(bike_pct * 0.5 + slow_pct * 0.3 + calm_pct * 0.2))
+
+    parts = []
+    if bike_pct > 0:
+        parts.append(f"bike lanes {bike_pct:.0f}%")
+    if slow_pct > 0:
+        parts.append(f"≤30 km/h zones {slow_pct:.0f}%")
+    if calm_pct > 0:
+        parts.append(f"traffic calming {calm_pct:.0f}%")
+
+    details = ", ".join(parts) if parts else "no cycling infrastructure data"
+
+    return {"safety_score": score, "details": details}
+
+
+def get_ride_density(lat: float, lng: float, radius_km: float, days: int = 30, conn=None) -> dict:
+    """Build a grid-based density map of recently ridden roads from GPS history.
+
+    Returns dict mapping (grid_lat, grid_lng) → ride_count.
+    Grid resolution: ~500m cells.
+    """
+    own_conn = False
+    if conn is None:
+        try:
+            from veloai.db import get_connection
+            conn = get_connection()
+            own_conn = True
+        except Exception:
+            return {}
+
+    if not conn:
+        return {}
+
+    grid_size = 0.005  # ~500m grid cells
+    density = {}
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT s.lat, s.lng
+                FROM activity_streams s
+                JOIN activities a ON a.id = s.activity_id
+                WHERE a.date >= CURRENT_DATE - interval '%s days'
+                  AND s.lat IS NOT NULL AND s.lng IS NOT NULL
+                  AND s.time_offset %% 30 = 0
+                  AND ABS(s.lat - %s) < %s AND ABS(s.lng - %s) < %s
+            """, (days, lat, radius_km / 111.0 * 1.5, lng, radius_km / 80.0 * 1.5))
+            for row in cur.fetchall():
+                grid_key = (round(row[0] / grid_size) * grid_size, round(row[1] / grid_size) * grid_size)
+                density[grid_key] = density.get(grid_key, 0) + 1
+        print(f"  [intelligence] Ride density: {len(density)} grid cells from last {days} days")
+    except Exception as e:
+        print(f"  [intelligence] Ride density failed: {e}")
+    finally:
+        if own_conn and conn:
+            conn.close()
+
+    return density
+
+
+def _density_at(density: dict, lat: float, lng: float, grid_size: float = 0.005) -> float:
+    """Get ride density score (0-1) at a location. Higher = more ridden."""
+    grid_key = (round(lat / grid_size) * grid_size, round(lng / grid_size) * grid_size)
+    count = density.get(grid_key, 0)
+    # Normalize: 10+ visits = max density
+    return min(1.0, count / 10.0)
+
+
+def smart_waypoints(
+    lat: float, lng: float, target_km: float, surface: str,
+    max_waypoints: int = 3,
+    strava_token: str | None = None,
+    preference: str = "variety",
+) -> list[dict]:
+    """Generate intelligent waypoints using POIs, Strava segments, and ride history.
+
+    Combines OSM POIs, Strava popular segments, and ride history density to
+    place waypoints at interesting locations. Preference controls history bias:
+    - "variety": penalize recently ridden areas (explore new roads)
+    - "comfort": boost recently ridden areas (stick to known roads)
+
+    Returns list of {lat, lng, name, reason} for use as Valhalla waypoints.
+    """
+    import math
+
+    radius_km = (target_km / (2 * math.pi)) * 1.2  # slightly larger than route radius
+
+    # Get POIs from OSM
+    pois = get_pois(lat, lng, radius_km)
+    print(f"  [intelligence] Found {len(pois)} POIs from OSM")
+
+    # Get Strava segments if token available
+    segments = []
+    if strava_token:
+        segments = get_strava_segments(lat, lng, radius_km, strava_token)
+        print(f"  [intelligence] Found {len(segments)} Strava segments")
+
+    # Get Komoot community highlights
+    komoot_highlights = get_komoot_highlights(lat, lng, radius_km, surface)
+    print(f"  [intelligence] Found {len(komoot_highlights)} Komoot highlights")
+
+    # Get ride history density
+    density = get_ride_density(lat, lng, radius_km)
+
+    # Combine and score candidates
+    candidates = []
+
+    for poi in pois:
+        dist = math.sqrt((poi["lat"] - lat) ** 2 + (poi["lng"] - lng) ** 2) * 111
+        # Prefer POIs that are roughly at the route radius (not too close, not too far)
+        ideal_dist = radius_km * 0.7
+        dist_score = max(0, 1 - abs(dist - ideal_dist) / radius_km)
+
+        # Type scoring: viewpoints and peaks > cafes > water > bike shops
+        type_scores = {
+            "tourism=viewpoint": 1.0,
+            "natural=peak": 0.9,
+            "amenity=cafe": 0.7,
+            "amenity=drinking_water": 0.4,
+            "amenity=bicycle_repair_station": 0.3,
+        }
+        type_score = type_scores.get(poi["type"], 0.5)
+
+        # Ride history adjustment
+        hist_density = _density_at(density, poi["lat"], poi["lng"])
+        if preference == "variety":
+            hist_score = 1.0 - hist_density  # penalize recently ridden
+        else:
+            hist_score = hist_density  # boost familiar areas
+
+        base_score = dist_score * 0.4 + type_score * 0.3
+        final_score = base_score + hist_score * 0.3 if density else dist_score * 0.6 + type_score * 0.4
+
+        candidates.append({
+            "lat": poi["lat"],
+            "lng": poi["lng"],
+            "name": poi["name"],
+            "reason": f"POI: {poi['type'].split('=')[1]}",
+            "score": final_score,
+            "angle": math.atan2(poi["lat"] - lat, poi["lng"] - lng),
+        })
+
+    for seg in segments[:10]:  # top 10 by popularity
+        dist = math.sqrt((seg["lat"] - lat) ** 2 + (seg["lng"] - lng) ** 2) * 111
+        ideal_dist = radius_km * 0.7
+        dist_score = max(0, 1 - abs(dist - ideal_dist) / radius_km)
+        pop_score = min(1.0, seg["athlete_count"] / 500)  # normalize
+
+        hist_density = _density_at(density, seg["lat"], seg["lng"])
+        if preference == "variety":
+            hist_score = 1.0 - hist_density
+        else:
+            hist_score = hist_density
+
+        base_score = dist_score * 0.3 + pop_score * 0.4
+        final_score = base_score + hist_score * 0.3 if density else dist_score * 0.4 + pop_score * 0.6
+
+        candidates.append({
+            "lat": seg["lat"],
+            "lng": seg["lng"],
+            "name": seg["name"],
+            "reason": f"Popular segment ({seg['athlete_count']} cyclists)",
+            "score": final_score,
+            "angle": math.atan2(seg["lat"] - lat, seg["lng"] - lng),
+        })
+
+    # Komoot highlights — high quality community POIs
+    komoot_type_scores = {
+        "viewpoint": 1.0, "trail": 0.9, "cycle_way": 0.9, "bridge": 0.8,
+        "historical_site": 0.8, "man_made_monument": 0.7, "beach": 0.7,
+        "settlement": 0.5, "other_man_made": 0.4,
+    }
+    for kh in komoot_highlights:
+        dist = math.sqrt((kh["lat"] - lat) ** 2 + (kh["lng"] - lng) ** 2) * 111
+        ideal_dist = radius_km * 0.7
+        dist_score = max(0, 1 - abs(dist - ideal_dist) / radius_km)
+        type_score = komoot_type_scores.get(kh["category"], 0.5)
+
+        hist_density = _density_at(density, kh["lat"], kh["lng"])
+        if preference == "variety":
+            hist_score = 1.0 - hist_density
+        else:
+            hist_score = hist_density
+
+        base_score = dist_score * 0.3 + type_score * 0.4
+        final_score = base_score + hist_score * 0.3 if density else dist_score * 0.5 + type_score * 0.5
+
+        candidates.append({
+            "lat": kh["lat"],
+            "lng": kh["lng"],
+            "name": kh["name"],
+            "reason": f"Komoot: {kh['category'].replace('_', ' ')}",
+            "score": final_score,
+            "angle": math.atan2(kh["lat"] - lat, kh["lng"] - lng),
+        })
+
+    if not candidates:
+        return []
+
+    # Load avoid zones from config
+    avoid_zones = []
+    try:
+        from veloai.config import load as load_config
+        avoid_zones = load_config().get("avoid", [])
+        if avoid_zones:
+            print(f"  [intelligence] Avoiding {len(avoid_zones)} configured zones")
+    except Exception:
+        pass
+
+    # Select waypoints spread around the circle (avoid clustering + avoid zones)
+    candidates.sort(key=lambda c: c["score"], reverse=True)
+    selected = []
+    used_angles = []
+
+    for c in candidates:
+        if len(selected) >= max_waypoints:
+            break
+        # Check angular separation (at least 45 degrees from any selected)
+        angle = c["angle"]
+        too_close = any(abs(angle - ua) < math.radians(45) for ua in used_angles)
+        if too_close:
+            continue
+        # Check avoid zones
+        in_avoid_zone = False
+        for zone in avoid_zones:
+            zdist = math.sqrt((c["lat"] - zone["lat"]) ** 2 + (c["lng"] - zone["lng"]) ** 2) * 111000  # meters
+            if zdist < zone.get("radius", 500):
+                in_avoid_zone = True
+                break
+        if in_avoid_zone:
+            continue
+        selected.append({
+            "lat": c["lat"],
+            "lng": c["lng"],
+            "name": c["name"],
+            "reason": c["reason"],
+        })
+        used_angles.append(angle)
+
+    # Sort by angle for sensible route ordering (clockwise)
+    selected.sort(key=lambda w: math.atan2(w["lat"] - lat, w["lng"] - lng))
+
+    return selected
