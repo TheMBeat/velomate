@@ -3,8 +3,6 @@
 import os
 from datetime import timedelta
 
-import psycopg2.extras
-
 
 DEFAULT_THRESHOLD_HR = 170
 DEFAULT_FTP = 150  # Estimated FTP (watts) — fallback only
@@ -139,7 +137,6 @@ def recalculate_fitness(conn):
         """)
         activity_rows = cur.fetchall()
 
-    tss_updates = []
     for act_id, duration_s, avg_hr, avg_power in activity_rows:
         if avg_power and avg_power > 0:
             tss = calculate_tss_power(duration_s, avg_power, ftp)
@@ -147,12 +144,8 @@ def recalculate_fitness(conn):
             tss = calculate_tss(duration_s, avg_hr, threshold_hr)
         else:
             tss = 0
-        tss_updates.append((round(tss, 1), act_id))
-
-    with conn.cursor() as cur:
-        psycopg2.extras.execute_batch(
-            cur, "UPDATE activities SET tss = %s WHERE id = %s", tss_updates
-        )
+        with conn.cursor() as cur:
+            cur.execute("UPDATE activities SET tss = %s WHERE id = %s", (round(tss, 1), act_id))
 
     # Compute NP, EF, Work for activities with power data
     print("[fitness] Computing NP/EF/Work...")
@@ -171,29 +164,34 @@ def recalculate_fitness(conn):
     np_count = 0
     for act_id, avg_hr, avg_power, duration_s in power_activities:
         with conn.cursor() as cur:
+            # NP: 30s rolling avg -> 4th power -> mean -> 4th root
             cur.execute("""
                 WITH rolling AS (
-                    SELECT
-                        AVG(power) OVER (
-                            ORDER BY time_offset
-                            RANGE BETWEEN 29 PRECEDING AND CURRENT ROW
-                        ) AS rolling_30s,
-                        power
+                    SELECT AVG(power) OVER (
+                        ORDER BY time_offset
+                        RANGE BETWEEN 29 PRECEDING AND CURRENT ROW
+                    ) AS rolling_30s
                     FROM activity_streams
                     WHERE activity_id = %s AND power IS NOT NULL
                 )
-                SELECT
-                    POWER(AVG(POWER(rolling_30s, 4)), 0.25),
-                    ROUND((SUM(power) / 1000.0)::numeric, 1)
+                SELECT POWER(AVG(POWER(rolling_30s, 4)), 0.25)
                 FROM rolling
                 WHERE rolling_30s IS NOT NULL
             """, (act_id,))
             row = cur.fetchone()
             np_val = round(row[0], 1) if row and row[0] else None
-            work_val = float(row[1]) if row and row[1] else None
 
         if np_val:
             ef_val = compute_ef(np_val, avg_hr)
+
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT ROUND((SUM(power) / 1000.0)::numeric, 1)
+                    FROM activity_streams
+                    WHERE activity_id = %s AND power IS NOT NULL
+                """, (act_id,))
+                work_row = cur.fetchone()
+                work_val = float(work_row[0]) if work_row and work_row[0] else None
 
             with conn.cursor() as cur:
                 cur.execute("""
@@ -236,35 +234,27 @@ def recalculate_fitness(conn):
     current = first_date
     count = 0
 
-    conn.autocommit = False
-    try:
-        while current <= last_date:
-            tss = daily_tss.get(current, 0)
-            ctl = ctl * (1 - 1/42) + tss * (1/42)
-            atl = atl * (1 - 1/7) + tss * (1/7)
-            tsb = ctl - atl
+    while current <= last_date:
+        tss = daily_tss.get(current, 0)
+        ctl = ctl * (1 - 1/42) + tss * (1/42)
+        atl = atl * (1 - 1/7) + tss * (1/7)
+        tsb = ctl - atl
 
-            # Calculate rolling weekly totals
-            week_start = current - timedelta(days=6)
-            weekly_dist = sum(v for k, v in daily_distance.items() if week_start <= k <= current)
-            weekly_elev = sum(v for k, v in daily_elevation.items() if week_start <= k <= current)
+        # Calculate rolling weekly totals
+        week_start = current - timedelta(days=6)
+        weekly_dist = sum(v for k, v in daily_distance.items() if week_start <= k <= current)
+        weekly_elev = sum(v for k, v in daily_elevation.items() if week_start <= k <= current)
 
-            upsert_athlete_stats(conn, current, {
-                "ctl": round(ctl, 2),
-                "atl": round(atl, 2),
-                "tsb": round(tsb, 2),
-                "resting_hr": None,
-                "vo2max": None,
-                "weekly_distance_m": round(weekly_dist, 1),
-                "weekly_elevation_m": round(weekly_elev, 1),
-            })
-            count += 1
-            current += timedelta(days=1)
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.autocommit = True
+        upsert_athlete_stats(conn, current, {
+            "ctl": round(ctl, 2),
+            "atl": round(atl, 2),
+            "tsb": round(tsb, 2),
+            "resting_hr": None,
+            "vo2max": None,
+            "weekly_distance_m": round(weekly_dist, 1),
+            "weekly_elevation_m": round(weekly_elev, 1),
+        })
+        count += 1
+        current += timedelta(days=1)
 
     print(f"[fitness] Calculated {count} days of fitness data (CTL={ctl:.1f}, ATL={atl:.1f}, TSB={ctl-atl:.1f})")
