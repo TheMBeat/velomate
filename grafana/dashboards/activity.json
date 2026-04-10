@@ -1069,10 +1069,10 @@
       "title": "Work",
       "type": "stat",
       "gridPos": {
-        "h": 3,
-        "w": 8,
         "x": 0,
-        "y": 21
+        "y": 21,
+        "w": 6,
+        "h": 3
       },
       "datasource": {
         "type": "postgres",
@@ -1112,10 +1112,10 @@
       "title": "TRIMP",
       "type": "stat",
       "gridPos": {
-        "h": 3,
-        "w": 8,
-        "x": 8,
-        "y": 21
+        "x": 6,
+        "y": 21,
+        "w": 6,
+        "h": 3
       },
       "datasource": {
         "type": "postgres",
@@ -1175,17 +1175,17 @@
           }
         }
       },
-      "description": "TRIMP (Training Impulse) \u2014 Banister formula\nExponential HR-based effort score.\n\n< 75 \u2014 Easy\n75-150 \u2014 Moderate\n150-250 \u2014 Hard\n250-400 \u2014 Very hard\n400+ \u2014 Extreme"
+      "description": "TRIMP (Training Impulse) \u2014 Banister formula\nExponential HR-based effort score calibrated for 1\u20132 hour rides.\n\n\ud83d\udd18 < 50 \u2014 Recovery\n\n\ud83d\udd35 50-75 \u2014 Easy endurance\n\n\ud83d\udfe2 75-100 \u2014 Moderate endurance\n\n\ud83d\udfe1 100-125 \u2014 Tempo / sustained\n\n\ud83d\udfe0 125-150 \u2014 Threshold / hard\n\n\ud83d\udd34 > 150 \u2014 Very hard / extreme\n\nNote: TRIMP and TSS measure different things. On stop-and-go rides (urban, MTB, crit) TRIMP can be notably higher than TSS \u2014 your HR stays elevated through coasting while power drops to zero. Both values are honest; the ride's true load sits between them."
     },
     {
       "id": 411,
       "title": "Aerobic Decoupling",
       "type": "stat",
       "gridPos": {
-        "h": 3,
-        "w": 8,
-        "x": 16,
-        "y": 21
+        "x": 12,
+        "y": 21,
+        "w": 6,
+        "h": 3
       },
       "datasource": {
         "type": "postgres",
@@ -1193,7 +1193,7 @@
       },
       "targets": [
         {
-          "rawSql": "WITH half AS (\n  SELECT MAX(time_offset) / 2 AS mid\n  FROM activity_streams\n  WHERE activity_id = ${activity_id}\n),\nhalves AS (\n  SELECT\n    CASE WHEN s.time_offset <= h.mid THEN 'first' ELSE 'second' END AS half,\n    s.power, s.hr\n  FROM activity_streams s\n  CROSS JOIN half h\n  WHERE s.activity_id = ${activity_id}\n    AND s.power IS NOT NULL\n    AND s.hr IS NOT NULL AND s.hr > 0\n)\nSELECT ROUND(((\n  (SELECT AVG(power)::float / NULLIF(AVG(hr), 0) FROM halves WHERE half = 'first') /\n  NULLIF((SELECT AVG(power)::float / NULLIF(AVG(hr), 0) FROM halves WHERE half = 'second'), 0)\n  - 1) * 100)::numeric, 1) AS \"Decoupling %\";",
+          "rawSql": "SELECT ROUND(aerobic_decoupling::numeric, 1) AS \"Decoupling %\" FROM activities WHERE id = ${activity_id};",
           "format": "table",
           "refId": "A"
         }
@@ -1234,7 +1234,85 @@
           }
         }
       },
-      "description": "Aerobic Decoupling (Friel)\nPower:HR ratio drift \u2014 first half vs second half.\n\nPositive = cardiac drift (HR rising relative to power).\n< 5% \u2014 Good aerobic fitness\n5-10% \u2014 Moderate drift\n> 10% \u2014 Significant drift, base fitness needs work"
+      "description": "Aerobic Decoupling (Friel)\nPower:HR ratio drift \u2014 first half vs second half.\n\nPositive = cardiac drift (HR rising relative to power).\n\n\ud83d\udfe2 < 5% \u2014 Good aerobic fitness\n\n\ud83d\udfe1 5-10% \u2014 Moderate drift\n\n\ud83d\udd34 > 10% \u2014 Significant drift, base fitness needs work"
+    },
+    {
+      "id": 1100,
+      "title": "Detected Intervals",
+      "type": "table",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 24
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "velomate"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT\n  ROW_NUMBER() OVER (ORDER BY start_offset_s) AS \"#\",\n  TO_CHAR((start_offset_s || ' seconds')::interval, 'HH24:MI:SS') AS \"Start\",\n  LPAD((duration_s / 60)::text, 2, '0') || ':' || LPAD((duration_s % 60)::text, 2, '0') AS \"Duration\",\n  ROUND(avg_power::numeric, 0) AS \"Avg W\",\n  ROUND(np::numeric, 0) AS \"NP\",\n  ROUND(max_power::numeric, 0) AS \"Max W\",\n  classification AS \"Type\"\nFROM ride_intervals\nWHERE activity_id = ${activity_id}\nORDER BY start_offset_s;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No intervals detected"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Type"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "sprint": {
+                        "color": "purple",
+                        "index": 0
+                      },
+                      "anaerobic": {
+                        "color": "red",
+                        "index": 1
+                      },
+                      "vo2": {
+                        "color": "orange",
+                        "index": 2
+                      },
+                      "threshold": {
+                        "color": "yellow",
+                        "index": 3
+                      },
+                      "sweetspot": {
+                        "color": "green",
+                        "index": 4
+                      },
+                      "tempo": {
+                        "color": "blue",
+                        "index": 5
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "description": "Automatically detected sustained efforts in this ride, classified by duration and intensity (% of ride FTP).\n\n\ud83d\udfe3 Sprint \u2014 > 150% FTP, < 30s\n\n\ud83d\udd34 Anaerobic \u2014 120\u2013150% FTP, 30s \u2013 2 min\n\n\ud83d\udfe0 VO2 \u2014 105\u2013120% FTP, 2 \u2013 5 min\n\n\ud83d\udfe1 Threshold \u2014 95\u2013105% FTP, 5 \u2013 20 min\n\n\ud83d\udfe2 Sweet spot \u2014 83\u201394% FTP, 15 \u2013 60 min\n\n\ud83d\udd35 Tempo \u2014 75\u201385% FTP, > 20 min"
     },
     {
       "id": 902,
@@ -1245,7 +1323,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 24
+        "y": 32
       },
       "panels": []
     },
@@ -1257,7 +1335,7 @@
         "h": 6,
         "w": 24,
         "x": 0,
-        "y": 25
+        "y": 33
       },
       "datasource": {
         "type": "postgres",
@@ -1367,7 +1445,7 @@
           }
         ]
       },
-      "description": "HR zone distribution per kilometer.\n\nShows where on the route you were working hard.\nStacked to 100% \u2014 each bar shows the zone split for that km."
+      "description": "HR zone distribution per kilometer.\n\nShows where on the route you were working hard. Stacked to 100% \u2014 each bar shows the zone split for that km.\n\n\ud83d\udd18 Z1 < 60% max HR \u2014 Recovery\n\n\ud83d\udd35 Z2 60-70% max HR \u2014 Endurance\n\n\ud83d\udfe2 Z3 70-80% max HR \u2014 Tempo\n\n\ud83d\udfe1 Z4 80-90% max HR \u2014 Threshold\n\n\ud83d\udd34 Z5 > 90% max HR \u2014 VO2max"
     },
     {
       "id": 403,
@@ -1377,7 +1455,7 @@
         "h": 6,
         "w": 24,
         "x": 0,
-        "y": 31
+        "y": 39
       },
       "datasource": {
         "type": "postgres",
@@ -1517,7 +1595,7 @@
           }
         ]
       },
-      "description": "Power zone distribution per kilometer.\n\nShows where on the route you produced the most power.\n6 Coggan zones based on FTP."
+      "description": "Power zone distribution per kilometer.\n\nShows where on the route you produced the most power. 7 Coggan zones based on FTP.\n\n\ud83d\udd18 Z1 < 55% FTP \u2014 Recovery\n\n\ud83d\udd35 Z2 55-75% FTP \u2014 Endurance\n\n\ud83d\udfe2 Z3 75-90% FTP \u2014 Tempo\n\n\ud83d\udfe1 Z4 90-105% FTP \u2014 Threshold\n\n\ud83d\udfe0 Z5 105-120% FTP \u2014 VO2max\n\n\ud83d\udd34 Z6 120-150% FTP \u2014 Anaerobic\n\n\ud83d\udfe3 Z7 > 150% FTP \u2014 Neuromuscular"
     },
     {
       "id": 31,
@@ -1527,7 +1605,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 37
+        "y": 45
       },
       "datasource": {
         "type": "postgres",
@@ -1639,7 +1717,7 @@
           }
         ]
       },
-      "description": "Time in each heart rate zone.\nBased on % of max HR.\n\nZ1 < 60% \u2014 Recovery\nZ2 60-70% \u2014 Endurance\nZ3 70-80% \u2014 Tempo\nZ4 80-90% \u2014 Threshold\nZ5 > 90% \u2014 VO2max"
+      "description": "Time in each heart rate zone.\nBased on % of max HR.\n\n\ud83d\udd18 Z1 < 60% \u2014 Recovery\n\n\ud83d\udd35 Z2 60-70% \u2014 Endurance\n\n\ud83d\udfe2 Z3 70-80% \u2014 Tempo\n\n\ud83d\udfe1 Z4 80-90% \u2014 Threshold\n\n\ud83d\udd34 Z5 > 90% \u2014 VO2max"
     },
     {
       "id": 32,
@@ -1649,7 +1727,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 37
+        "y": 45
       },
       "datasource": {
         "type": "postgres",
@@ -1791,7 +1869,7 @@
           }
         ]
       },
-      "description": "Time in each power zone.\n\nZones based on FTP, estimated from best\n\n20-min power \u00d7 0.95 or configured via VELOMATE_FTP.\n\n\ud83d\udd18 Z1 < 55% \u2014 Recovery\n\n\ud83d\udd35 Z2 55-75% \u2014 Endurance\n\n\ud83d\udfe2 Z3 75-90% \u2014 Tempo\n\n\ud83d\udfe1 Z4 90-105% \u2014 Threshold\n\n\ud83d\udfe0 Z5 105-120% \u2014 VO2max\n\n\ud83d\udd34 Z6 > 120% \u2014 Anaerobic"
+      "description": "Time in each power zone.\n\nZones based on FTP, estimated from best 20-min power \u00d7 0.95 or configured via VELOMATE_FTP.\n\n\ud83d\udd18 Z1 < 55% \u2014 Recovery\n\n\ud83d\udd35 Z2 55-75% \u2014 Endurance\n\n\ud83d\udfe2 Z3 75-90% \u2014 Tempo\n\n\ud83d\udfe1 Z4 90-105% \u2014 Threshold\n\n\ud83d\udfe0 Z5 105-120% \u2014 VO2max\n\n\ud83d\udd34 Z6 120-150% \u2014 Anaerobic\n\n\ud83d\udfe3 Z7 > 150% \u2014 Neuromuscular"
     },
     {
       "id": 42,
@@ -1801,7 +1879,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 45
+        "y": 53
       },
       "datasource": {
         "type": "postgres",
@@ -1932,7 +2010,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 45
+        "y": 53
       },
       "datasource": {
         "type": "postgres",
@@ -1940,7 +2018,7 @@
       },
       "targets": [
         {
-          "rawSql": "WITH ftp AS (\n  SELECT COALESCE(\n    (SELECT value::numeric FROM sync_state WHERE key = 'configured_ftp' AND value::numeric > 0),\n    (SELECT value::numeric FROM sync_state WHERE key = 'estimated_ftp' AND value::numeric > 0),\n    150\n  ) AS ftp_val\n), buckets AS (SELECT FLOOR(power / 10) * 10 AS bucket, COUNT(*) / 60.0 AS mins, CASE WHEN power < ftp.ftp_val * 0.55 THEN 'Z1 Recovery' WHEN power < ftp.ftp_val * 0.75 THEN 'Z2 Endurance' WHEN power < ftp.ftp_val * 0.90 THEN 'Z3 Tempo' WHEN power < ftp.ftp_val * 1.05 THEN 'Z4 Threshold' WHEN power < ftp.ftp_val * 1.20 THEN 'Z5 VO2max' WHEN power < ftp.ftp_val * 1.50 THEN 'Z6 Anaerobic' ELSE 'Z7 Neuromuscular' END AS zone FROM activity_streams, ftp WHERE activity_id = ${activity_id} AND power IS NOT NULL AND power > 0 GROUP BY bucket, zone) SELECT bucket::int AS \"Power (W)\", COALESCE(SUM(mins) FILTER (WHERE zone = 'Z1 Recovery'), 0) AS \"Z1 Recovery\", COALESCE(SUM(mins) FILTER (WHERE zone = 'Z2 Endurance'), 0) AS \"Z2 Endurance\", COALESCE(SUM(mins) FILTER (WHERE zone = 'Z3 Tempo'), 0) AS \"Z3 Tempo\", COALESCE(SUM(mins) FILTER (WHERE zone = 'Z4 Threshold'), 0) AS \"Z4 Threshold\", COALESCE(SUM(mins) FILTER (WHERE zone = 'Z5 VO2max'), 0) AS \"Z5 VO2max\", COALESCE(SUM(mins) FILTER (WHERE zone = 'Z6 Anaerobic'), 0) AS \"Z6 Anaerobic\",\n  COALESCE(SUM(mins) FILTER (WHERE zone = 'Z7 Neuromuscular'), 0) AS \"Z7 Neuromuscular\" FROM buckets GROUP BY bucket ORDER BY bucket;",
+          "rawSql": "WITH ftp AS (\n  SELECT COALESCE(\n    (SELECT value::numeric FROM sync_state WHERE key = 'configured_ftp' AND value::numeric > 0),\n    (SELECT value::numeric FROM sync_state WHERE key = 'estimated_ftp' AND value::numeric > 0),\n    150\n  ) AS ftp_val\n), buckets AS (SELECT FLOOR(power / 25) * 25 AS bucket, COUNT(*) / 60.0 AS mins, CASE WHEN power < ftp.ftp_val * 0.55 THEN 'Z1 Recovery' WHEN power < ftp.ftp_val * 0.75 THEN 'Z2 Endurance' WHEN power < ftp.ftp_val * 0.90 THEN 'Z3 Tempo' WHEN power < ftp.ftp_val * 1.05 THEN 'Z4 Threshold' WHEN power < ftp.ftp_val * 1.20 THEN 'Z5 VO2max' WHEN power < ftp.ftp_val * 1.50 THEN 'Z6 Anaerobic' ELSE 'Z7 Neuromuscular' END AS zone FROM activity_streams, ftp WHERE activity_id = ${activity_id} AND power IS NOT NULL AND power > 0 GROUP BY bucket, zone) SELECT bucket::int AS \"Power (W)\", COALESCE(SUM(mins) FILTER (WHERE zone = 'Z1 Recovery'), 0) AS \"Z1 Recovery\", COALESCE(SUM(mins) FILTER (WHERE zone = 'Z2 Endurance'), 0) AS \"Z2 Endurance\", COALESCE(SUM(mins) FILTER (WHERE zone = 'Z3 Tempo'), 0) AS \"Z3 Tempo\", COALESCE(SUM(mins) FILTER (WHERE zone = 'Z4 Threshold'), 0) AS \"Z4 Threshold\", COALESCE(SUM(mins) FILTER (WHERE zone = 'Z5 VO2max'), 0) AS \"Z5 VO2max\", COALESCE(SUM(mins) FILTER (WHERE zone = 'Z6 Anaerobic'), 0) AS \"Z6 Anaerobic\",\n  COALESCE(SUM(mins) FILTER (WHERE zone = 'Z7 Neuromuscular'), 0) AS \"Z7 Neuromuscular\" FROM buckets GROUP BY bucket ORDER BY bucket;",
           "format": "table",
           "refId": "A"
         }
@@ -2082,6 +2160,10 @@
                   "fixedColor": "#9333ea",
                   "mode": "fixed"
                 }
+              },
+              {
+                "id": "unit",
+                "value": "min"
               }
             ]
           }
@@ -2098,7 +2180,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 53
+        "y": 61
       },
       "panels": []
     },
@@ -2110,7 +2192,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 54
+        "y": 62
       },
       "datasource": {
         "type": "postgres",
@@ -2166,7 +2248,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 62
+        "y": 70
       },
       "panels": []
     },
@@ -2178,7 +2260,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 63
+        "y": 71
       },
       "datasource": {
         "type": "postgres",
@@ -2211,7 +2293,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 71
+        "y": 79
       },
       "panels": []
     },
@@ -2223,7 +2305,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 72
+        "y": 80
       },
       "datasource": {
         "type": "postgres",
@@ -2350,7 +2432,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 82
+        "y": 90
       },
       "datasource": {
         "type": "postgres",
@@ -2503,7 +2585,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 92
+        "y": 100
       },
       "datasource": {
         "type": "postgres",
@@ -2622,7 +2704,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 102
+        "y": 110
       },
       "panels": []
     },
@@ -2634,7 +2716,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 103
+        "y": 111
       },
       "datasource": {
         "type": "postgres",
@@ -2682,6 +2764,58 @@
         "overrides": []
       },
       "description": "Scatter plot showing power output vs heart rate.\n\nA tight cluster = good aerobic efficiency.\nPoints drifting right over time = cardiac drift."
+    },
+    {
+      "id": 37,
+      "title": "W/kg (NP)",
+      "description": "Normalized power-to-weight ratio for this ride.\n\nCalculated as NP / ride_weight. Uses NP rather than avg_power\nbecause it better reflects the physiological cost of variable efforts.\n\nSet your weight via VELOMATE_WEIGHT in .env.",
+      "type": "stat",
+      "gridPos": {
+        "x": 18,
+        "y": 21,
+        "w": 6,
+        "h": 3
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "velomate"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT ROUND((a.np / a.ride_weight)::numeric, 2) AS \"W/kg\" FROM activities a WHERE a.id = ${activity_id} AND a.np IS NOT NULL AND a.np > 0 AND a.ride_weight IS NOT NULL AND a.ride_weight > 0;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No weight",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "dark-orange"
+          },
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "dark-orange",
+                "value": null
+              }
+            ]
+          }
+        }
+      }
     }
   ]
 }

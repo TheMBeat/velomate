@@ -38,7 +38,9 @@ def _make_conn(activity_rows, power_activity_rows=None, tss_rows=None,
     """Build a mock connection that returns prescribed rows for each query.
 
     activity_rows: [(id, duration_s, avg_hr, avg_power, np, ride_ftp), ...]
-    power_activity_rows: [(id, avg_hr, avg_power), ...] -- for NP query
+    power_activity_rows: [(id, avg_hr, avg_power, existing_np, existing_decoupling), ...]
+        -- for Step 1 NP/decoupling loop. 3 cursors per activity:
+        SELECT power+hr stream, UPDATE np/ef/vi/work, UPDATE aerobic_decoupling.
     tss_rows: [(date, tss, distance_m, elevation_m), ...] -- for final readback
     backfill_count: number of rides needing FTP backfill (0 = skip backfill)
     trimp_activity_ids: [id, ...] -- activities needing TRIMP computation
@@ -48,13 +50,16 @@ def _make_conn(activity_rows, power_activity_rows=None, tss_rows=None,
     Cursor sequence in recalculate_fitness (called via patched wrapper):
       0: estimate_threshold_hr
       1: estimate_ftp (rolling 20-min) -- skipped when configured_ftp=True
-      2: SELECT power activities for NP/EF/VI
-      3..3+2*N-1: per-power-activity (NP rolling query + update with VI)
-      3+2*N: COUNT rides needing FTP backfill
+      2: SELECT power activities for Step 1 NP/EF/VI/decoupling loop
+      3..3+3*N-1: per-power-activity triplet
+          (stream SELECT + NP/EF/VI/work UPDATE + decoupling UPDATE)
+      3+3*N: COUNT rides needing FTP backfill
       When backfill_count > 0 and configured_ftp: 1 stamp cursor
       When backfill_count > 0 and auto-estimate: 2 cursors (backfill + stamp)
       When backfill_count == 0: no backfill/stamp cursors
-      Then: TSS+IF select, batch, TRIMP select, per-TRIMP cursors, readback
+      Then: Step 2.5 interval activities SELECT (returns [] in mock so the
+      loop is empty), TSS+IF select, batch, TRIMP select, per-TRIMP cursors,
+      readback.
     """
     conn = MagicMock()
     conn.autocommit = True
@@ -66,9 +71,12 @@ def _make_conn(activity_rows, power_activity_rows=None, tss_rows=None,
         b = 1 if configured_ftp else 2  # stamp-only vs backfill+stamp
     else:
         b = 0
-    ftp_cursor_offset = 1 if configured_ftp else 0  # estimate_ftp skipped when configured
-    backfill_count_idx = 3 + 2 * n_power - ftp_cursor_offset
-    tss_select_idx = backfill_count_idx + 1 + b
+    # estimate_ftp() is now ALWAYS called (even when configured_ftp is set), so
+    # the cursor sequence no longer skips index 1. Tests that previously set
+    # configured_ftp=True still need a (250,) response for that cursor.
+    backfill_count_idx = 3 + 3 * n_power
+    interval_select_idx = backfill_count_idx + 1 + b  # Step 2.5 top-level SELECT
+    tss_select_idx = interval_select_idx + 1
     tss_batch_idx = tss_select_idx + 1
     trimp_select_idx = tss_batch_idx + 1
     trimp_start_idx = trimp_select_idx + 1
@@ -87,26 +95,37 @@ def _make_conn(activity_rows, power_activity_rows=None, tss_rows=None,
         cursor_call_count[0] += 1
         captured_cursors.append((idx, cur))
 
-        np_select_idx = 2 - ftp_cursor_offset
+        np_select_idx = 2
 
         if idx == 0:
             cur.fetchone.return_value = (170,)
-        elif idx == 1 and not configured_ftp:
+        elif idx == 1:
+            # estimate_ftp — always called, even when configured_ftp is set
             cur.fetchone.return_value = (250,)
         elif idx == np_select_idx:
             cur.fetchall.return_value = power_activity_rows or []
         elif np_select_idx < idx < backfill_count_idx:
-            # NP: per-activity power stream fetch (fetchall) + update (alternate)
+            # Per-activity triplet (Step 1):
+            #   0: stream SELECT (power, hr)
+            #   1: NP/EF/VI/work UPDATE
+            #   2: aerobic_decoupling UPDATE
             offset = idx - np_select_idx - 1
-            if offset % 2 == 0:
-                # SELECT power samples — return 60 samples at 200W
-                cur.fetchall.return_value = [(200, 200)] * 60
-            # else: UPDATE np/ef/vi (no special setup)
+            if offset % 3 == 0:
+                # SELECT power, hr samples — return 60 samples at (200W, 150bpm)
+                cur.fetchall.return_value = [(200, 150)] * 60
+            # else: UPDATE np/ef/vi/work or UPDATE aerobic_decoupling
+            # (no special setup needed for UPDATEs)
         elif idx == backfill_count_idx:
             cur.fetchone.return_value = (backfill_count,)
-        elif backfill_count_idx < idx < tss_select_idx:
+        elif backfill_count_idx < idx < interval_select_idx:
             # Backfill/stamp cursors (only when backfill_count > 0)
             cur.rowcount = backfill_count
+        elif idx == interval_select_idx:
+            # Step 2.5 interval activities SELECT — return [] so the
+            # detection loop doesn't iterate (tests don't exercise the
+            # stream-fetch/insert path; pure-function coverage is in
+            # tests/test_intervals.py).
+            cur.fetchall.return_value = []
         elif idx == tss_select_idx:
             cur.fetchall.return_value = activity_rows
         elif idx == tss_batch_idx:
@@ -285,8 +304,9 @@ class TestNPSkipGuard:
         """Activities with power streams and np IS NULL should get NP computed."""
         today = date.today()
         activity_rows = [(1, 3600, 150, 200, None, 200)]
-        # This activity appears in NP query (np IS NULL, has power streams)
-        power_activity_rows = [(1, 150, 200)]
+        # This activity appears in NP query (np IS NULL, aerobic_decoupling IS NULL, has power streams)
+        # 5-tuple: (id, avg_hr, avg_power, existing_np, existing_decoupling)
+        power_activity_rows = [(1, 150, 200, None, None)]
         tss_rows = [(today, 80.0, 50000, 500)]
 
         conn = _make_conn(activity_rows, power_activity_rows=power_activity_rows, tss_rows=tss_rows)
@@ -367,6 +387,89 @@ class TestBatchTSSUpdate:
         assert tss_data[2][0] == 0
         assert tss_data[2][1] is None
 
+    def test_high_vi_ride_uses_avg_power_for_tss(self):
+        """Regression test for the VI-aware TSS fix: on a high-VI ride
+        (np=176, avg=114 → VI=1.54) the TSS loop must compute TSS from
+        avg_power, not NP. Locks in the behaviour so future refactors
+        can't silently revert to the NP-overestimation bug.
+
+        User's real 2026-04-03 ride: NP=176, avg=114, 86 min, FTP=175.
+        NP-based TSS: (86*60 * 176 * 176/175) / (175 * 3600) * 100 = 145.5
+        Avg-based TSS: (86*60 * 114 * 114/175) / (175 * 3600) * 100 = 63.7
+        """
+        today = date.today()
+        # (id, duration_s, avg_hr, avg_power, np, ride_ftp)
+        activity_rows = [
+            (1, 86 * 60, 140, 114, 176, 175),  # high VI = 1.54 → avg_power path
+            (2, 3600, 150, 200, 220, 175),     # normal VI = 1.10 → NP path
+        ]
+        tss_rows = [(today, 50.0, 40000, 300)]
+
+        conn = _make_conn(activity_rows, tss_rows=tss_rows)
+        import psycopg2.extras as extras_mock
+
+        with patch.dict(sys.modules, {"db": MagicMock()}):
+            recalculate_fitness(conn)
+
+        batch_call = extras_mock.execute_batch.call_args
+        tss_data = batch_call[0][2]
+        # High-VI ride: TSS computed from avg_power (114), not NP (176).
+        # Hand computed: (86*60 * 114 * (114/175)) / (175 * 3600) * 100
+        # = 5160 * 114 * 0.6514 / 630000 * 100
+        # ≈ 60.8
+        assert 55 <= tss_data[0][0] <= 68, (
+            f"high-VI ride TSS should be avg_power-based (~61), got {tss_data[0][0]} "
+            f"— likely reverted to NP-based (would be ~145)"
+        )
+        # IF should also be avg_power-based: 114/175 = 0.65
+        assert tss_data[0][1] == pytest.approx(0.65, abs=0.01)
+
+        # Normal VI ride: TSS computed from NP (220), not avg_power (200).
+        # (3600 * 220 * (220/175)) / (175 * 3600) * 100
+        # = 220 * 1.257 / 175 * 100 ≈ 158
+        assert 150 <= tss_data[1][0] <= 165, (
+            f"normal-VI ride TSS should be NP-based (~158), got {tss_data[1][0]}"
+        )
+        # IF = 220/175 = 1.26
+        assert tss_data[1][1] == pytest.approx(1.26, abs=0.01)
+
+    def test_hr_tss_uses_lthr_not_max_hr(self):
+        """Regression guard for the HR TSS fallback path.
+
+        Coggan HR TSS formula is `duration_h × (avg_hr / LTHR)² × 100` where
+        LTHR (Lactate Threshold HR) is approximately 89% of max HR per Friel's
+        convention. Previously the call site passed configured max HR directly
+        into calculate_tss as if it were LTHR, underestimating HR TSS by
+        (0.89² = 0.79) — a ~21% shortfall. Only fires on HR-only rides (no
+        power stream) so it was latent on datasets where every ride has power,
+        but would skew any HR-only ride (dead power meter, HR-only fitness
+        tracker workout).
+
+        Test ride: 1h at avg_hr 150 with mocked estimated max_hr = 170.
+          LTHR = round(170 × 0.89) = 151
+          Old wrong (max_hr): (150/170)² × 100 = 77.9 TSS
+          New right (LTHR):   (150/151)² × 100 = 98.7 TSS
+        """
+        today = date.today()
+        # HR-only activity: avg_hr=150, avg_power=None, np=None → HR TSS path
+        activity_rows = [(1, 3600, 150, None, None, 200)]
+        tss_rows = [(today, 50.0, 40000, 300)]
+
+        conn = _make_conn(activity_rows, tss_rows=tss_rows)
+        import psycopg2.extras as extras_mock
+
+        with patch.dict(sys.modules, {"db": MagicMock()}):
+            recalculate_fitness(conn)
+
+        batch_call = extras_mock.execute_batch.call_args
+        tss_data = batch_call[0][2]
+        # With mock max_hr=170, LTHR=151, HR TSS ≈ 98.7
+        # The old buggy value using max_hr directly would be ~77.9
+        assert 96 <= tss_data[0][0] <= 101, (
+            f"HR TSS should be LTHR-based (~99), got {tss_data[0][0]} "
+            f"— likely still using max_hr (77.9) as threshold"
+        )
+
     def test_ride_ftp_none_falls_back_to_global_ftp(self):
         """Activity with ride_ftp=None should use global FTP (250) for TSS.
         Defensive path: in production, backfill+stamp would set ride_ftp before
@@ -394,9 +497,13 @@ class TestBatchTSSUpdate:
         # Activity 2 (ride FTP=200):   TSS = (3600 * 200 * 1.0) / (200 * 3600) * 100 = 100.0
         assert tss_data[0][0] == 64.0
         assert tss_data[1][0] == 100.0
-        # Both have avg_power (not NP), so IF is None (IF only set when NP available)
-        assert tss_data[0][1] is None
-        assert tss_data[1][1] is None
+        # Both have avg_power (no NP), so IF is computed from avg_power / FTP
+        # (VI-aware TSS: when NP is absent, avg_power drives both TSS and IF so
+        # the invariant IF² × duration_h × 100 ≈ TSS holds).
+        # Activity 1: IF = 200/250 = 0.80
+        # Activity 2: IF = 200/200 = 1.00
+        assert tss_data[0][1] == 0.80
+        assert tss_data[1][1] == 1.00
 
 
 # ---------------------------------------------------------------------------
@@ -479,22 +586,23 @@ class TestFTPBackfill:
 
     def test_configured_ftp_stamps_directly_no_backfill(self):
         """When VELOMATE_FTP is set, rides get stamped with configured FTP
-        instead of running the expensive stream-based backfill query."""
+        instead of running the expensive stream-based backfill query.
+        estimate_ftp() is still called (always) but its result is only used
+        as the diagnostic estimated_ftp value, not for the stamp."""
         today = date.today()
         activity_rows = [(1, 3600, None, 200, None, 200)]
         tss_rows = [(today, 80.0, 50000, 500)]
 
         # configured_ftp=True: mock expects 1 stamp cursor (not 2 for backfill+stamp)
-        # and no FTP estimate cursor (skipped when env var is set)
         conn = _make_conn(activity_rows, tss_rows=tss_rows, backfill_count=3,
                           configured_ftp=True)
 
         with patch.dict("os.environ", {"VELOMATE_FTP": "175"}):
             recalculate_fitness(conn)
 
-        # The stamp cursor is right after the COUNT cursor
-        # With configured_ftp: backfill_count_idx = 2, stamp = idx 3
-        stamp_idx = 3
+        # Cursor sequence with configured FTP: threshold(0), estimate_ftp(1),
+        # np_select(2), count(3), stamp(4). The stamp is right after the COUNT cursor.
+        stamp_idx = 4
         _, stamp_cur = conn._cursors[stamp_idx]
         sql = stamp_cur.execute.call_args[0][0]
         params = stamp_cur.execute.call_args[0][1]
@@ -509,8 +617,10 @@ class TestFTPBackfill:
                 assert "rolling_avg" not in sql_str, \
                     "Stream-based backfill should not run when FTP is configured"
 
-    def test_configured_ftp_adds_one_cursor_vs_auto(self):
-        """Configured FTP uses 1 cursor (stamp) vs auto-estimate's 2 (backfill+stamp)."""
+    def test_configured_ftp_uses_one_fewer_cursor_in_backfill(self):
+        """Configured FTP path stamps directly (1 cursor) vs auto-estimate's
+        backfill+stamp pair (2 cursors). estimate_ftp() is now called in BOTH
+        paths so it doesn't contribute to the difference any more."""
         today = date.today()
         activity_rows = [(1, 3600, None, 200, None, 200)]
         tss_rows = [(today, 80.0, 50000, 500)]
@@ -524,10 +634,11 @@ class TestFTPBackfill:
         with patch.dict("os.environ", {"VELOMATE_FTP": "175"}):
             recalculate_fitness(conn_cfg)
 
-        # Auto-estimate: estimate_ftp(1) + backfill(1) + stamp(1) = 3 extra
-        # Configured: no estimate_ftp + stamp(1) = 1 extra
-        # Net difference: 2 fewer cursors
-        assert conn_auto.cursor.call_count == conn_cfg.cursor.call_count + 2
+        # Both paths: estimate_ftp(1)
+        # Auto: backfill(1) + stamp(1) = 2 cursors
+        # Configured: stamp(1) = 1 cursor
+        # Net difference: 1 fewer cursor for configured
+        assert conn_auto.cursor.call_count == conn_cfg.cursor.call_count + 1
 
     def test_backfill_update_receives_ftp_fallback(self):
         """Backfill UPDATE should be called with global FTP (250) as COALESCE fallback."""
@@ -568,7 +679,10 @@ class TestRecalcEdgeCases:
         upsert_mock.assert_not_called()
 
     def test_env_var_overrides_auto_estimation(self):
-        """VELOMATE_MAX_HR and VELOMATE_FTP env vars skip auto-estimation."""
+        """VELOMATE_MAX_HR overrides auto-estimation. VELOMATE_FTP overrides
+        the FTP used for computation but estimate_ftp() is now still called
+        unconditionally so its result can be persisted as a diagnostic value
+        in sync_state.estimated_ftp alongside the configured FTP."""
         conn = MagicMock()
         conn.autocommit = True
         # Return empty results to short-circuit
@@ -579,13 +693,15 @@ class TestRecalcEdgeCases:
         with (
             patch.dict("os.environ", {"VELOMATE_MAX_HR": "180", "VELOMATE_FTP": "260"}),
             patch("fitness.estimate_threshold_hr") as mock_thr,
-            patch("fitness.estimate_ftp") as mock_ftp,
+            patch("fitness.estimate_ftp", return_value=200) as mock_ftp,
         ):
             try:
                 _original_recalc(conn)
             except (ValueError, StopIteration):
                 pass
 
-        # Auto-estimation functions should NOT be called when env vars are set
+        # estimate_threshold_hr is still skipped when VELOMATE_MAX_HR is set
         mock_thr.assert_not_called()
-        mock_ftp.assert_not_called()
+        # estimate_ftp is now ALWAYS called so its result can be persisted
+        # as the diagnostic estimated_ftp value, even when configured FTP is set
+        mock_ftp.assert_called_once()

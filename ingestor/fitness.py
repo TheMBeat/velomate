@@ -6,13 +6,22 @@ from datetime import timedelta
 
 import psycopg2.extras
 
+from intervals import detect_intervals
+
 
 DEFAULT_THRESHOLD_HR = 170
 DEFAULT_FTP = 150  # Estimated FTP (watts) — fallback only
 
+# VI boundary above which the Coggan NP-based TSS overestimates physiological
+# load. Stop-and-go urban rides (coasting + surges) drive NP's 4th-power
+# weighting way above the sustained effort the rider actually produced. Above
+# this threshold, VeloMate computes TSS from avg_power instead of NP. Below
+# (the typical 1.0–1.3 range) NP remains the right input for the Coggan model.
+HIGH_VI_THRESHOLD = 1.30
+
 # Bump this when NP/EF/Work calculation logic changes.
 # On startup, if the stored version differs, all values are recalculated.
-METRICS_VERSION = "7"  # v7: NP uses 30s SMA (Coggan standard, matches GoldenCheetah)
+METRICS_VERSION = "10"  # v10: VI-aware TSS uses avg_power when VI > 1.30
 
 
 def calculate_tss(duration_s: int, avg_hr: int, threshold_hr: int) -> float:
@@ -86,6 +95,78 @@ def compute_vi(np: float, avg_power: int) -> float | None:
     if not np or not avg_power or avg_power <= 0:
         return None
     return round(np / avg_power, 2)
+
+
+def select_power_for_tss(np, avg_power):
+    """Pick which power value to feed into Coggan TSS given the ride's VI.
+
+    The Coggan NP-based TSS formula assumes steady or near-steady effort
+    (VI ≈ 1.0–1.2). On rides dominated by coasting + surges (VI > 1.30) —
+    urban commutes, crit-style bunch rides, technical MTB — the NP 4th-power
+    weighting overestimates sustained physiological load, which in turn
+    inflates TSS, ATL, and pushes TSB unnaturally negative.
+
+    Rule:
+      - Both present and VI > HIGH_VI_THRESHOLD → use avg_power
+      - Both present and VI ≤ HIGH_VI_THRESHOLD → use NP (Coggan standard)
+      - Only one usable (non-None, > 0) → use whichever is usable
+      - Neither usable → return None (caller falls back to HR-based TSS or 0)
+
+    Returns the chosen power value (watts) or None.
+    """
+    np_ok = bool(np and np > 0)
+    avg_ok = bool(avg_power and avg_power > 0)
+    if np_ok and avg_ok:
+        vi = np / avg_power
+        return avg_power if vi > HIGH_VI_THRESHOLD else np
+    if np_ok:
+        return np
+    if avg_ok:
+        return avg_power
+    return None
+
+
+def compute_decoupling(power_samples: list, hr_samples: list) -> float | None:
+    """Aerobic decoupling (Friel) from matched power + HR 1-second streams.
+    Splits the ride into two halves by time index, computes EF (avg_power/avg_hr)
+    for each half from its valid samples, returns (first_EF / second_EF - 1) * 100
+    as a percentage.
+
+    Positive values = cardiac drift (HR rising relative to power in the second half),
+    which is a leading indicator of aerobic fatigue or insufficient base fitness.
+
+    Returns None when streams are missing, mismatched, too short for a
+    meaningful split, or when either half lacks valid HR data. None values
+    inside the streams are filtered per-half.
+    """
+    if not power_samples or not hr_samples:
+        return None
+    if len(power_samples) != len(hr_samples):
+        return None
+    if len(power_samples) < 4:  # need at least 2 samples per half
+        return None
+
+    mid = len(power_samples) // 2
+    first_power, first_hr = power_samples[:mid], hr_samples[:mid]
+    second_power, second_hr = power_samples[mid:], hr_samples[mid:]
+
+    def ef(power_half, hr_half):
+        pairs = [(p, h) for p, h in zip(power_half, hr_half)
+                 if p is not None and h is not None and h > 0]
+        if len(pairs) < 2:
+            return None
+        avg_p = sum(p for p, _ in pairs) / len(pairs)
+        avg_h = sum(h for _, h in pairs) / len(pairs)
+        if avg_h <= 0:
+            return None
+        return avg_p / avg_h
+
+    first_ef = ef(first_power, first_hr)
+    second_ef = ef(second_power, second_hr)
+    if first_ef is None or second_ef is None or second_ef == 0:
+        return None
+
+    return round((first_ef / second_ef - 1) * 100, 2)
 
 
 def calculate_tss_power(duration_s: int, np: float, ftp: int) -> float:
@@ -187,11 +268,15 @@ def recalculate_fitness(conn):
         ftp_val = int(env_ftp) if env_ftp else 0
     except ValueError:
         ftp_val = 0
+
+    # Always compute the auto-estimate so it can be persisted as a diagnostic
+    # value alongside the configured FTP, regardless of which one is in use.
+    auto_ftp = estimate_ftp(conn)
     if ftp_val > 0:
         ftp = ftp_val
-        print(f"[fitness] Using configured FTP: {ftp}W")
+        print(f"[fitness] Using configured FTP: {ftp}W (algorithmic estimate: {auto_ftp}W)")
     else:
-        ftp = estimate_ftp(conn)
+        ftp = auto_ftp
         print(f"[fitness] Auto-estimated FTP: {ftp}W (rolling 90-day best 20min × 0.95)")
 
     env_rhr = os.environ.get("VELOMATE_RESTING_HR", "")
@@ -202,17 +287,29 @@ def recalculate_fitness(conn):
     resting_hr = rhr_val if rhr_val > 0 else 50
     print(f"[fitness] Resting HR: {resting_hr} {'(configured)' if rhr_val > 0 else '(default 50 bpm)'}")
 
-    # Persist estimated FTP so Grafana can read it directly from sync_state
+    env_weight = os.environ.get("VELOMATE_WEIGHT", "")
+    try:
+        weight = float(env_weight) if env_weight else 0.0
+    except ValueError:
+        weight = 0.0
+
+    # Persist the algorithmic estimate so Grafana can read it directly from
+    # sync_state. This is the auto-computed value, NOT the currently-active
+    # FTP — when configured_ftp is set, the two diverge and the difference is
+    # the diagnostic signal ("recalibrate?").
     import db as _db
-    _db.set_sync_state(conn, "estimated_ftp", str(ftp))
+    _db.set_sync_state(conn, "estimated_ftp", str(auto_ftp))
 
     # Check metrics version — reset all derived metrics if calculation logic changed
     stored_version = _db.get_sync_state(conn, "metrics_version")
     if stored_version != METRICS_VERSION:
         print(f"[fitness] Metrics version changed ({stored_version} → {METRICS_VERSION}), recalculating everything...")
         with conn.cursor() as cur:
-            cur.execute("UPDATE activities SET tss = NULL, np = NULL, ef = NULL, work_kj = NULL, ride_ftp = NULL, intensity_factor = NULL, trimp = NULL, variability_index = NULL")
+            # ride_weight intentionally excluded — it's user-configured, not derived.
+            # Historical rides preserve their stamped weight across version bumps.
+            cur.execute("UPDATE activities SET tss = NULL, np = NULL, ef = NULL, work_kj = NULL, ride_ftp = NULL, intensity_factor = NULL, trimp = NULL, variability_index = NULL, aerobic_decoupling = NULL")
             cur.execute("DELETE FROM athlete_stats")
+            cur.execute("DELETE FROM ride_intervals")
         _db.set_sync_state(conn, "metrics_version", METRICS_VERSION)
 
     # Step 1: Compute NP, EF, Work for activities with power stream data
@@ -220,9 +317,9 @@ def recalculate_fitness(conn):
     print("[fitness] Computing NP/EF/Work...")
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT a.id, a.avg_hr, a.avg_power
+            SELECT a.id, a.avg_hr, a.avg_power, a.np, a.aerobic_decoupling
             FROM activities a
-            WHERE a.np IS NULL AND a.date IS NOT NULL
+            WHERE (a.np IS NULL OR a.aerobic_decoupling IS NULL) AND a.date IS NOT NULL
               AND EXISTS (
                   SELECT 1 FROM activity_streams s
                   WHERE s.activity_id = a.id AND s.power IS NOT NULL
@@ -232,28 +329,42 @@ def recalculate_fitness(conn):
         power_activities = cur.fetchall()
 
     np_count = 0
-    for act_id, avg_hr, avg_power in power_activities:
+    decoupling_count = 0
+    for act_id, avg_hr, avg_power, existing_np, existing_decoupling in power_activities:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT power FROM activity_streams
+                SELECT power, hr FROM activity_streams
                 WHERE activity_id = %s AND power IS NOT NULL
                 ORDER BY time_offset
             """, (act_id,))
-            power_samples = [r[0] for r in cur.fetchall()]
+            rows = cur.fetchall()
+            power_samples = [r[0] for r in rows]
+            hr_samples = [r[1] for r in rows]
             work_val = round(sum(power_samples) / 1000.0, 1)
 
-        np_val = compute_np(power_samples)
+        # Only compute NP/EF/VI/Work if missing (avoids redundant work)
+        np_val = existing_np
+        if existing_np is None:
+            np_val = compute_np(power_samples)
+            if np_val:
+                ef_val = compute_ef(np_val, avg_hr)
+                vi_val = compute_vi(np_val, avg_power)
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        UPDATE activities SET np = %s, ef = %s, work_kj = %s, variability_index = %s WHERE id = %s
+                    """, (np_val, ef_val, work_val, vi_val, act_id))
+                np_count += 1
 
-        if np_val:
-            ef_val = compute_ef(np_val, avg_hr)
-            vi_val = compute_vi(np_val, avg_power)
-            with conn.cursor() as cur:
-                cur.execute("""
-                    UPDATE activities SET np = %s, ef = %s, work_kj = %s, variability_index = %s WHERE id = %s
-                """, (np_val, ef_val, work_val, vi_val, act_id))
-            np_count += 1
+        # Compute decoupling if missing and HR stream has any data
+        if existing_decoupling is None and any(h is not None and h > 0 for h in hr_samples):
+            dec_val = compute_decoupling(power_samples, hr_samples)
+            if dec_val is not None:
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE activities SET aerobic_decoupling = %s WHERE id = %s", (dec_val, act_id))
+                decoupling_count += 1
 
     print(f"[fitness] Computed NP/EF/Work for {np_count} activities")
+    print(f"[fitness] Computed aerobic decoupling for {decoupling_count} activities")
 
     # Step 2: Backfill ride_ftp for historical rides that don't have one.
     # Uses the best 20-min power from the 90 days before each ride's date.
@@ -306,8 +417,87 @@ def recalculate_fitness(conn):
                 if cur.rowcount > 0:
                     print(f"[fitness] Stamped estimated FTP ({ftp}W) on {cur.rowcount} rides without historical data")
 
-    # Step 3: Compute TSS using per-ride FTP (ride_ftp), NP preferred, fallbacks
-    # Standard Coggan TSS = (duration × NP × IF) / (FTP × 3600) × 100 where IF = NP/FTP
+    # Step 2.1: Backfill ride_weight for rides that don't have one.
+    # Unlike FTP, weight can't be auto-estimated — purely user-configured.
+    if weight > 0:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE activities SET ride_weight = %s WHERE ride_weight IS NULL AND date IS NOT NULL", (weight,))
+            if cur.rowcount > 0:
+                print(f"[fitness] Stamped weight ({weight}kg) on {cur.rowcount} rides")
+
+    # Step 2.5: Detect intervals for rides with no ride_intervals rows yet.
+    # Runs AFTER ride_ftp backfill (Step 2) so classification uses per-ride historical
+    # FTP, not the current global FTP — critical for correct classification on
+    # METRICS_VERSION bumps that reset ride_ftp for every activity.
+    print("[fitness] Detecting intervals...")
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT a.id, a.ride_ftp
+            FROM activities a
+            WHERE a.date IS NOT NULL
+              AND NOT EXISTS (SELECT 1 FROM ride_intervals ri WHERE ri.activity_id = a.id)
+              AND EXISTS (
+                  SELECT 1 FROM activity_streams s
+                  WHERE s.activity_id = a.id AND s.power IS NOT NULL
+                  GROUP BY s.activity_id HAVING COUNT(*) > 30
+              )
+        """)
+        interval_activities = cur.fetchall()
+
+    interval_activity_count = 0
+    interval_row_count = 0
+    for act_id, act_ride_ftp in interval_activities:
+        with conn.cursor() as cur:
+            # Fetch time_offset alongside power+hr so detected sample indices can be
+            # translated to real time offsets (handles rare power-meter dropout gaps).
+            cur.execute("""
+                SELECT time_offset, power, hr FROM activity_streams
+                WHERE activity_id = %s AND power IS NOT NULL
+                ORDER BY time_offset
+            """, (act_id,))
+            rows = cur.fetchall()
+            time_offsets = [r[0] for r in rows]
+            power_samples = [r[1] for r in rows]
+            hr_samples = [r[2] for r in rows]
+
+        act_ftp = act_ride_ftp if act_ride_ftp and act_ride_ftp > 0 else ftp
+        detected = detect_intervals(power_samples, ftp=act_ftp)
+        if not detected:
+            continue
+
+        insert_rows = []
+        for d in detected:
+            start_idx = d["start_offset_s"]
+            end_idx = start_idx + d["duration_s"]
+            # Map sample index → real time_offset from the stream (unfiltered second
+            # count). In streams without NULL-power gaps these are identical; with
+            # gaps the sample-index based start would otherwise display wrong in
+            # the Activity Details "Start" column.
+            real_start = time_offsets[start_idx] if start_idx < len(time_offsets) else start_idx
+            hr_slice = [h for h in hr_samples[start_idx:end_idx] if h is not None and h > 0]
+            avg_hr_val = int(round(sum(hr_slice) / len(hr_slice))) if hr_slice else None
+            insert_rows.append((
+                act_id, real_start, d["duration_s"], d["avg_power"],
+                d["np"], d["max_power"], avg_hr_val, d["classification"],
+            ))
+        with conn.cursor() as cur:
+            psycopg2.extras.execute_values(
+                cur,
+                """INSERT INTO ride_intervals
+                    (activity_id, start_offset_s, duration_s, avg_power, np, max_power, avg_hr, classification)
+                   VALUES %s""",
+                insert_rows,
+            )
+        interval_activity_count += 1
+        interval_row_count += len(insert_rows)
+
+    print(f"[fitness] Detected {interval_row_count} intervals across {interval_activity_count} activities")
+
+    # Step 3: Compute TSS using per-ride FTP (ride_ftp). VI-aware input:
+    # NP for standard-variability rides (VI ≤ 1.30), avg_power for high-VI
+    # rides (urban stop-and-go) where NP overestimates sustained load. HR
+    # fallback when no power stream exists. IF is computed from the SAME
+    # power input used for TSS so IF² × duration_h × 100 ≈ TSS holds.
     with conn.cursor() as cur:
         cur.execute("""
             SELECT id, duration_s, avg_hr, avg_power, np, ride_ftp
@@ -319,15 +509,22 @@ def recalculate_fitness(conn):
     tss_updates = []
     for act_id, duration_s, avg_hr, avg_power, np_val, ride_ftp_val in activity_rows:
         act_ftp = ride_ftp_val if ride_ftp_val and ride_ftp_val > 0 else ftp
-        if np_val and np_val > 0:
-            tss = calculate_tss_power(duration_s, np_val, act_ftp)
-        elif avg_power and avg_power > 0:
-            tss = calculate_tss_power(duration_s, avg_power, act_ftp)
+        tss_power = select_power_for_tss(np_val, avg_power)
+        if tss_power is not None:
+            tss = calculate_tss_power(duration_s, tss_power, act_ftp)
+            if_val = compute_if(tss_power, act_ftp)
         elif avg_hr and avg_hr > 0:
-            tss = calculate_tss(duration_s, avg_hr, threshold_hr)
+            # Coggan HR TSS = duration_h × (avg_hr / LTHR)² × 100.
+            # LTHR (Lactate Threshold HR) ≈ 89% of max HR per Friel convention.
+            # threshold_hr at this point holds max HR (from VELOMATE_MAX_HR or
+            # the estimate_threshold_hr auto-estimate), so derive LTHR here
+            # before feeding it into the HR TSS formula.
+            lthr = int(round(threshold_hr * 0.89))
+            tss = calculate_tss(duration_s, avg_hr, lthr)
+            if_val = None
         else:
             tss = 0
-        if_val = compute_if(np_val, act_ftp) if np_val and np_val > 0 else None
+            if_val = None
         tss_updates.append((round(tss, 1), if_val, act_id))
 
     with conn.cursor() as cur:

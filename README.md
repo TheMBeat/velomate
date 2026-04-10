@@ -22,9 +22,12 @@ Inspired by [TeslaMate](https://github.com/teslamate-org/teslamate). Works with 
 - Stores full per-second telemetry (HR, power, cadence, speed, altitude, GPS)
 - Calculates CTL/ATL/TSB fitness metrics locally (no Strava Premium needed)
 - TRIMP (Training Impulse) computed from HR stream data with HRR capped at 1.0 (no Strava Premium needed)
-- Normalized Power (NP), Intensity Factor (IF), Variability Index (VI), Efficiency Factor (EF), and Work (kJ) pre-calculated per activity from stream data
+- Normalized Power (NP), Intensity Factor (IF), Variability Index (VI), Efficiency Factor (EF), Work (kJ), aerobic decoupling, and W/kg pre-calculated per activity from stream data
+- VI-aware TSS: uses avg_power instead of NP when VI > 1.30 (urban stop-and-go rides) to prevent overestimation
+- Auto interval detection: Coggan-style classification (sprint / anaerobic / vo2 / threshold / sweetspot / tempo) from power streams
 - All derived metrics computed by the ingestor and stored — Grafana reads stored values (single source of truth)
 - FTP auto-estimated from rolling 90-day best 20-minute power, or configured manually via `VELOMATE_FTP`
+- Per-ride weight stored from `VELOMATE_WEIGHT` — enables W/kg tracking with historical preservation
 - Daily fitness recalculation at 00:05 (rest days show CTL/ATL decay)
 - Smart deduplication when multiple devices record the same ride
 
@@ -41,41 +44,41 @@ Inspired by [TeslaMate](https://github.com/teslamate-org/teslamate). Works with 
 
 ### Grafana Dashboards
 
-Three dashboards with 98 panels across 12 visualization types.
+Three dashboards with 128 panels across 12 visualization types.
 
-**Overview** (34 panels) — your training hub
-- 12 stat cards with period comparison + sport type filter
-- 8 delta comparison cards (vs previous period)
-- Fitness section: CTL/ATL/TSB with fill-between shading, FTP, TSB gauge, weekly streak, 6-week fitness delta
-- 10 daily charts split by ride type (Outdoor/Zwift/E-Bike/Indoor)
-- Ride type donut, ride frequency bar chart
-- Outdoor records table (period best vs all-time best)
+**Overview** (43 panels) — your training hub
+- 10 period summary stats (Rides, Distance, Elevation, Duration, TSS, Avg Power, Avg HR, Avg Speed, Avg Decoupling, Calories) with sport type filter
+- 10 delta comparison cards (vs previous period, including Δ Calories)
+- Fitness section: CTL/ATL/TSB with fill-between shading, Configured + Estimated FTP side-by-side, TSB gauge, weekly streak, days since ride, 6-week fitness delta, ride type donut
+- 6 trend charts (distance & elevation, duration & TSS, avg power & HR, avg speed & cadence, calories & rides, rolling weekly volume)
+- Ride frequency bar chart
 - Activities table with drill-down to Activity Details
-- Lifetime ride heatmap
-- Manual annotations for marking events (races, FTP tests, injuries)
+- Default time range: 7 days
 
 ![Activity Details](screenshots/activity.png)
 
-**Activity Details** (32 panels) — per-ride deep dive
-- 12 summary stat cards + 7 advanced metrics (NP, IF, VI, EF, Work, TRIMP, aerobic decoupling)
+**Activity Details** (41 panels) — per-ride deep dive
+- 12 summary stat cards + 8 advanced metrics (NP, IF, VI, EF, Work, TRIMP, aerobic decoupling, W/kg)
 - GPS route map with speed/HR/power color overlay
 - HR and power zones by kilometer (stacked bar charts)
 - HR and power zone distribution (Coggan model, zone-colored)
+- Power distribution histogram (25W buckets, 7-zone colored)
 - Power vs HR scatter plot (cardiac drift detection)
 - Power zone bands on HR & Power telemetry
 - Speed & elevation / HR & power / cadence & grade telemetry (distance-based x-axis)
 - Per-km splits table with best/worst markers
 - Power duration curve
+- Detected intervals table (Coggan-style: sprint / anaerobic / vo2 / threshold / sweetspot / tempo)
 
 ![All Time Progression](screenshots/progression.png)
 
-**All Time Progression** (32 panels) — long-term trends
+**All Time Progression** (44 panels) — long-term trends
 - 6 stat cards: total distance, elevation, rides, hours, current FTP, peak CTL
-- 6 progression scatter plots with 10-ride rolling averages and regression lines (speed, power, NP, EF, HR, distance)
+- 8 progression scatter plots with 10-ride rolling averages (speed, power, NP, EF, HR, distance, aerobic decoupling, NP/kg)
 - FTP progression (monthly estimated from stream data)
 - Best efforts (1min/5min/20min peak power per ride)
 - Weekly power range (candlestick — week-over-week comparison)
-- Training zone polarization (monthly power + HR zone stacked bars)
+- Training zone polarization (monthly power + HR zone stacked bars + monthly interval distribution)
 - CTL/ATL/TSB fitness history with fill-between shading
 - 6 cumulative totals (distance, elevation, duration, rides, TSS, calories)
 - Monthly trends stacked by ride type
@@ -182,7 +185,7 @@ curl -X POST https://www.strava.com/oauth/token \
 docker compose up -d
 ```
 
-On first run, the ingestor backfills the last 12 months of Strava activities.
+On first run, the ingestor backfills the last 12 months of Strava activities. Configure the window via `VELOMATE_BACKFILL_MONTHS` (set to `0` for full history). Increasing this value on a running deployment auto-triggers a re-backfill on the next restart.
 
 ### 4. Set up the CLI
 
@@ -260,32 +263,40 @@ python3 -m velomate.cli plan --destination Cascais --distance 50km
 ## Fitness Metrics
 
 ```
-Power TSS = (duration_s × NP × IF) / (FTP × 3600) × 100   (preferred)
-HR TSS    = (duration_h) × (avg_hr / threshold_hr)² × 100  (fallback)
+Power TSS = (duration_s × P × IF) / (FTP × 3600) × 100     where P is VI-aware
+            — P = NP when VI ≤ 1.30 (Coggan standard)
+            — P = avg_power when VI > 1.30 (high-variability urban rides)
+HR TSS    = (duration_h) × (avg_hr / LTHR)² × 100          (fallback, no power)
 CTL       = 42-day EMA of daily TSS   (chronic training load / fitness)
 ATL       = 7-day EMA of daily TSS    (acute training load / fatigue)
 TSB       = CTL − ATL                 (training stress balance / form)
 ```
 
-- **NP**: Normalized Power — 30-second SMA (circular buffer), 4th power, mean, 4th root. Matches GoldenCheetah IsoPower (Coggan standard)
-- **IF**: Intensity Factor = NP / FTP. Uses per-ride FTP for historical accuracy
-- **VI**: Variability Index = NP / avg power. Higher = more variable effort
+- **NP**: Normalized Power — 30-second SMA (circular buffer), 4th power, mean, 4th root. Matches GoldenCheetah IsoPower (Coggan standard). Computed and stored on every power ride
+- **VI-aware TSS**: The Coggan NP model is calibrated for VI ≈ 1.0–1.2. On rides with VI > 1.30 (urban stop-and-go, crit-style surges, technical MTB) the 4th-power weighting overestimates sustained load. VeloMate switches to avg_power-based TSS above this boundary so high-VI rides get a physiologically realistic TSS. Steady rides (the majority) are unaffected
+- **IF**: Intensity Factor — computed from the same power used for TSS (NP or avg_power depending on VI) divided by per-ride FTP, so `TSS ≈ duration_h × IF² × 100` holds on every ride
+- **VI**: Variability Index = NP / avg_power. Higher = more variable effort. Drives the VI-aware TSS routing above
 - **EF**: Efficiency Factor = NP / avg HR. Rising EF indicates improving aerobic fitness
-- **TRIMP**: Banister exponential formula from per-second HR data. HRR capped at 1.0 to prevent blowup when HR exceeds configured max
-- **FTP**: auto-estimated from rolling 90-day best 20-minute power × 0.95, or configured via `VELOMATE_FTP`
+- **TRIMP**: Banister exponential formula from per-second HR data. Uses max HR for HRR normalization. HRR capped at 1.0 to prevent blowup when HR exceeds configured max
+- **Aerobic decoupling**: `(first_half_EF / second_half_EF − 1) × 100`. Positive = cardiac drift. Computed per ride by the ingestor, stored on `activities.aerobic_decoupling`, trended on All Time Progression
+- **FTP**: auto-estimated from rolling 90-day best 20-minute power × 0.95, or configured via `VELOMATE_FTP`. The algorithmic estimate is always computed and stored as a diagnostic value alongside the configured one — Overview shows both side-by-side so a mismatch is visible at a glance
 - **Work**: Total energy output in kJ = sum of per-second power from stream data
-- **Threshold HR**: 95th percentile of your max HRs, or configured via `VELOMATE_MAX_HR`
+- **Max HR**: 95th percentile of ride max HRs, or configured via `VELOMATE_MAX_HR`. Used for Banister TRIMP
+- **LTHR (Lactate Threshold HR)**: derived as ~89% of max HR per Friel convention. Used as the threshold value in HR-based TSS when no power stream is available
+- **W/kg**: NP / ride_weight. Uses NP (not avg_power) because it better reflects the physiological cost of variable efforts. Per-ride `ride_weight` stored from `VELOMATE_WEIGHT` — historical rides preserve their weight if the setting changes later. Shown on Activity Details and as NP/kg Trend on All Time Progression
+- **Auto interval detection**: Coggan-style classification (sprint / anaerobic / vo2 / threshold / sweetspot / tempo) from the power stream, stored in the `ride_intervals` table. Classification uses per-ride FTP for historical accuracy
 - **TSB interpretation**: > +10 fresh · -10 to +10 neutral · < -10 fatigued
 
 ## Database Schema
 
 | Table | Contents |
 |-------|----------|
-| `activities` | Every ride — distance, duration, HR, power, cadence, elevation, calories, TSS, NP, IF, VI, EF, TRIMP, Work (kJ), ride FTP, sport type, device |
+| `activities` | Every ride — distance, duration, HR, power, cadence, elevation, calories, TSS, NP, IF, VI, EF, TRIMP, Work (kJ), aerobic decoupling, ride FTP, sport type, device |
 | `activity_streams` | Per-second telemetry — HR, power, cadence, speed, altitude, lat/lng |
+| `ride_intervals` | Auto-detected intervals with duration, power, classification (sprint/anaerobic/vo2/threshold/sweetspot/tempo) |
 | `athlete_stats` | Daily fitness metrics — CTL, ATL, TSB, weekly volume |
 | `routes` | Legacy — created by schema but not actively written to |
-| `sync_state` | Ingestor bookmarks (last synced timestamps) |
+| `sync_state` | Ingestor bookmarks + configured/estimated FTP + metrics version |
 
 Schema is managed in code (`ingestor/db.py:create_schema()`) using `IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS`. No migration tool.
 
@@ -305,7 +316,9 @@ Configured via `.env` file:
 | `VELOMATE_MAX_HR` | No | Your max heart rate (0 = auto-estimate) |
 | `VELOMATE_FTP` | No | Your FTP in watts (0 = auto-estimate) |
 | `VELOMATE_RESTING_HR` | No | Resting heart rate in bpm (default 50) |
+| `VELOMATE_WEIGHT` | No | Your weight in kg (0 = disabled). Enables W/kg on Activity Details and NP/kg Trend on All Time Progression. Stored per ride — historical rides preserve their weight if you change it later |
 | `VELOMATE_RESET_RIDE_FTP` | No | Set to `1` to reset all per-ride FTP values on next restart (one-shot) |
+| `VELOMATE_BACKFILL_MONTHS` | No | How far back to fetch activities. Default `12`. Set to `0` for full Strava history (slow — can take hours and span multiple days due to rate limits). **Increasing this value on a running deployment** triggers an auto-backfill on the next restart to pull the extended window. Decreasing it logs a note but leaves existing older activities in the DB (this controls the backfill horizon, not data retention). |
 
 ### CLI (local)
 

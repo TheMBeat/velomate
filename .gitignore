@@ -1,15 +1,18 @@
+# Python
 __pycache__/
 *.pyc
-.env
+
+# Testing
+.coverage
+.pytest_cache/
+
+# Environment / secrets
 *.env
-venv/
-.venv/
-.DS_Store
-*.egg-info/
-dist/
 config.yaml
+
+# OS
+**/.DS_Store
+
+# Claude Code (local)
 .claude/settings.local.json
 .superpowers/
-.coverage
-scripts/github-overlay/
-.pytest_cache/
