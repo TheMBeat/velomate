@@ -35,7 +35,7 @@ def test_create_schema_adds_source_unique_index():
     assert "ON activities(source_system, source_external_id)" in executed_sql
 
 
-def test_insert_uses_generic_on_conflict_for_source_dedup():
+def test_insert_uses_source_conflict_target_for_fit_dedup():
     conn, cur = _mock_conn_with_cursor(fetchone_return=(42,))
     data = {
         "strava_id": None,
@@ -64,6 +64,36 @@ def test_insert_uses_generic_on_conflict_for_source_dedup():
     executed_sql = cur.execute.call_args.args[0]
 
     assert activity_id == 42
-    assert "ON CONFLICT DO UPDATE SET" in executed_sql
+    assert "ON CONFLICT (source_system, source_external_id)" in executed_sql
     assert "source_system" in executed_sql
     assert "source_external_id" in executed_sql
+
+
+def test_insert_uses_strava_conflict_target_when_strava_id_present():
+    conn, cur = _mock_conn_with_cursor(fetchone_return=(7,))
+    data = {
+        "strava_id": 999,
+        "name": "strava ride",
+        "date": "2026-01-01T12:00:00+00:00",
+        "distance_m": 1000.0,
+        "duration_s": 300,
+        "elevation_m": 0.0,
+        "avg_hr": None,
+        "max_hr": None,
+        "avg_power": None,
+        "max_power": None,
+        "avg_cadence": None,
+        "avg_speed_kmh": 12.0,
+        "calories": None,
+        "suffer_score": None,
+        "device": "unknown",
+        "source_system": None,
+        "source_external_id": None,
+        "source_file_name": None,
+        "is_indoor": False,
+        "sport_type": "cycling_outdoor",
+    }
+
+    ingestor_db._do_insert(conn, data, datetime.now(timezone.utc))
+    executed_sql = cur.execute.call_args.args[0]
+    assert "ON CONFLICT (strava_id)" in executed_sql

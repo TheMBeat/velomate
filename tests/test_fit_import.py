@@ -112,3 +112,19 @@ def test_persistence_and_source_tagging():
     assert upsert_activity.call_args.args[1]["source_system"] == "fit_upload"
     upsert_streams.assert_called_once()
     recalc.assert_called_once()
+
+
+def test_save_import_token_consumed_once():
+    token = webapp._store_pending({"preview": {}, "activity": {"name": "upload.fit", "source_system": "fit_upload", "strava_id": None}, "streams": []})
+
+    mock_conn = MagicMock()
+    with (
+        patch("webapp.get_connection", return_value=mock_conn),
+        patch("webapp.upsert_activity", return_value=(10, False)),
+        patch("webapp.upsert_streams"),
+        patch("webapp.recalculate_fitness"),
+    ):
+        webapp._save_import(token)
+
+    with pytest.raises(KeyError):
+        webapp._save_import(token)

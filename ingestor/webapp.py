@@ -5,6 +5,7 @@ from __future__ import annotations
 import cgi
 import json
 import uuid
+from threading import RLock
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
@@ -15,26 +16,34 @@ from fitness import recalculate_fitness
 
 _PENDING_IMPORTS: dict[str, dict] = {}
 _PENDING_TTL = timedelta(minutes=30)
+_PENDING_IMPORTS_LOCK = RLock()
 
 
 def _purge_pending() -> None:
-    now = datetime.now(timezone.utc)
-    expired = [token for token, payload in _PENDING_IMPORTS.items() if now - payload["created_at"] > _PENDING_TTL]
-    for token in expired:
-        _PENDING_IMPORTS.pop(token, None)
+    with _PENDING_IMPORTS_LOCK:
+        now = datetime.now(timezone.utc)
+        expired = [token for token, payload in _PENDING_IMPORTS.items() if now - payload["created_at"] > _PENDING_TTL]
+        for token in expired:
+            _PENDING_IMPORTS.pop(token, None)
 
 
 def _store_pending(parsed: dict) -> str:
-    _purge_pending()
-    token = str(uuid.uuid4())
-    _PENDING_IMPORTS[token] = {"created_at": datetime.now(timezone.utc), "parsed": parsed}
-    return token
+    with _PENDING_IMPORTS_LOCK:
+        now = datetime.now(timezone.utc)
+        expired = [token for token, payload in _PENDING_IMPORTS.items() if now - payload["created_at"] > _PENDING_TTL]
+        for token in expired:
+            _PENDING_IMPORTS.pop(token, None)
+        token = str(uuid.uuid4())
+        _PENDING_IMPORTS[token] = {"created_at": now, "parsed": parsed}
+        return token
 
 
 def _save_import(token: str) -> tuple[int, int]:
-    pending = _PENDING_IMPORTS.get(token)
+    with _PENDING_IMPORTS_LOCK:
+        pending = _PENDING_IMPORTS.pop(token, None)
     if not pending:
         raise KeyError("Unknown or expired import token")
+
     parsed = pending["parsed"]
     conn = get_connection()
     try:
@@ -44,7 +53,6 @@ def _save_import(token: str) -> tuple[int, int]:
         recalculate_fitness(conn)
     finally:
         conn.close()
-    _PENDING_IMPORTS.pop(token, None)
     return activity_id, len(parsed["streams"])
 
 

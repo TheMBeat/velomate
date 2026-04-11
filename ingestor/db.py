@@ -221,9 +221,14 @@ def merge_activity_data(existing: tuple, new_data: dict) -> dict:
 
 
 def _do_insert(conn, data: dict, now) -> int:
-    """Execute the INSERT ... ON CONFLICT for an activity. Returns activity id."""
-    with conn.cursor() as cur:
-        cur.execute("""
+    """Execute INSERT ... ON CONFLICT for an activity. Returns activity id."""
+    conflict_target = None
+    if data.get("strava_id") is not None:
+        conflict_target = "(strava_id)"
+    elif data.get("source_system") and data.get("source_external_id"):
+        conflict_target = "(source_system, source_external_id)"
+
+    base_sql = """
             INSERT INTO activities (
                 strava_id, name, date, distance_m, duration_s, elevation_m,
                 avg_hr, max_hr, avg_power, max_power, avg_cadence,
@@ -237,7 +242,10 @@ def _do_insert(conn, data: dict, now) -> int:
                 %(source_system)s, %(source_external_id)s, %(source_file_name)s,
                 %(is_indoor)s, %(sport_type)s, %(synced_at)s
             )
-            ON CONFLICT DO UPDATE SET
+    """
+
+    update_sql = """
+            DO UPDATE SET
                 name = EXCLUDED.name,
                 distance_m = EXCLUDED.distance_m,
                 duration_s = EXCLUDED.duration_s,
@@ -258,7 +266,16 @@ def _do_insert(conn, data: dict, now) -> int:
                 sport_type = EXCLUDED.sport_type,
                 synced_at = EXCLUDED.synced_at
             RETURNING id
-        """, {**data, "synced_at": now})
+    """
+
+    sql = base_sql
+    if conflict_target:
+        sql += f"ON CONFLICT {conflict_target} " + update_sql
+    else:
+        sql += "RETURNING id"
+
+    with conn.cursor() as cur:
+        cur.execute(sql, {**data, "synced_at": now})
         return cur.fetchone()[0]
 
 
