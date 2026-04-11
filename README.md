@@ -7,7 +7,7 @@
 [![Grafana 12.4](https://img.shields.io/badge/grafana-12.4-orange)](https://grafana.com/)
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20VeloMate-FF5E5B?logo=ko-fi&logoColor=white)](https://ko-fi.com/elduty)
 
-A self-hosted cycling data platform — automatic ride ingestion from Strava, Grafana dashboards for analytics, and intelligent route planning. **No Strava Premium required** — all metrics (fitness, power zones, training load, TRIMP) are computed locally from raw data.
+A self-hosted cycling data platform — automatic ride ingestion from Strava or direct FIT uploads, Grafana dashboards for analytics, and intelligent route planning. **No Strava Premium required** — all metrics (fitness, power zones, training load, TRIMP) are computed locally from raw data.
 
 Inspired by [TeslaMate](https://github.com/teslamate-org/teslamate). Works with any device that syncs to Strava.
 
@@ -17,6 +17,7 @@ Inspired by [TeslaMate](https://github.com/teslamate-org/teslamate). Works with 
 
 ### Data Ingestion
 - Polls Strava every 10 minutes for new cycling rides
+- **NEW (MVP):** Import local `.fit` files via built-in web UI or REST API (no Strava credentials required)
 - **Cycling only** — Ride, VirtualRide, and EBikeRide are ingested. Runs, swims, walks, strength, and all other Strava activity types are filtered out at sync
 - Classifies rides as: **Outdoor**, **Zwift**, **Indoor** (trainer), or **E-Bike** — dashboards can filter by type
 - Stores full per-second telemetry (HR, power, cadence, speed, altitude, GPS)
@@ -136,7 +137,7 @@ The record with the higher total score wins. Missing fields from the losing reco
 ## Architecture
 
 ```
-Any device → Strava → [Ingestor] → PostgreSQL → Grafana dashboards
+Any device → Strava and/or FIT Upload → [Ingestor API/UI] → PostgreSQL → Grafana dashboards
                                         ↑
                             VeloMate CLI (route planning + recommendations)
                                         ↓
@@ -186,6 +187,21 @@ docker compose up -d
 ```
 
 On first run, the ingestor backfills the last 12 months of Strava activities. Configure the window via `VELOMATE_BACKFILL_MONTHS` (set to `0` for full history). Increasing this value on a running deployment auto-triggers a re-backfill on the next restart.
+
+### FIT import (no Strava required)
+
+If `STRAVA_CLIENT_ID`, `STRAVA_CLIENT_SECRET`, and `STRAVA_REFRESH_TOKEN` are left empty, VeloMate still boots and exposes FIT upload endpoints:
+
+- Web UI: `http://localhost:8080/imports/fit`
+- REST preview: `POST /api/imports/fit` (`multipart/form-data`, field name `file`)
+- REST confirm: `POST /api/imports/fit/confirm` with JSON body `{"import_token":"..."}`
+
+Import preview includes start/end time, duration, distance, sample count, and availability flags for GPS/speed/cadence/power/HR. Confirming import writes the activity and streams to PostgreSQL and triggers metric recalculation using the existing pipeline.
+
+Current MVP limitations:
+- Uploads are processed in-process (no background queue).
+- Pending import previews expire after 30 minutes.
+- FIT files are assumed to be cycling activities.
 
 ### 4. Set up the CLI
 

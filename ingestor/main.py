@@ -4,12 +4,14 @@ import os
 import sys
 import time
 import traceback
+from threading import Thread
 
 import schedule
 
 from db import get_connection, create_schema, get_sync_state, set_sync_state
 from strava import sync_activities, backfill, reclassify_activities
 from fitness import recalculate_fitness
+from webapp import run_server
 
 
 def _get_healthy_conn():
@@ -49,6 +51,24 @@ def _daily_fitness_recalc():
         if conn:
             conn.close()
 
+
+
+
+def _strava_enabled() -> bool:
+    """True when all required Strava credentials are set."""
+    required = ("STRAVA_CLIENT_ID", "STRAVA_CLIENT_SECRET", "STRAVA_REFRESH_TOKEN")
+    missing = [k for k in required if not os.environ.get(k)]
+    if missing:
+        print(f"[main] Strava integration disabled (missing: {', '.join(missing)})")
+        return False
+    return True
+
+
+def _scheduler_loop():
+    """Run scheduled jobs forever."""
+    while True:
+        schedule.run_pending()
+        time.sleep(30)
 
 def poll_strava():
     """Fetch activities since last sync, store streams, recalculate fitness."""
@@ -335,14 +355,16 @@ def run():
     except Exception as e:
         print(f"[main] Could not check backfill window state (skipping detection): {e}")
 
-    # Backfill on first run OR when the configured window grew
-    if not has_data or force_backfill:
+    strava_enabled = _strava_enabled()
+
+    # Backfill only if Strava is enabled (FIT-only deployments can still boot).
+    if strava_enabled and (not has_data or force_backfill):
         if force_backfill:
             print("[main] Running backfill for extended window")
         else:
             print("[main] No previous sync — running backfill")
         run_backfill()
-    else:
+    elif has_data:
         # Recalculate fitness on startup to extend CTL/ATL/TSB decay through today
         conn = get_connection()
         try:
@@ -350,6 +372,8 @@ def run():
             print("[main] Fitness recalculated through today")
         finally:
             conn.close()
+    else:
+        print("[main] No previous data and Strava disabled — waiting for FIT imports")
 
     # Persist current backfill window so the next restart can detect changes.
     # Done after run_backfill() so a crash during backfill leaves the old value
@@ -364,17 +388,22 @@ def run():
         print(f"[main] Could not persist configured_backfill_months (non-fatal): {e}")
 
     interval = int(os.environ.get("POLL_INTERVAL_MINUTES", 10))
-    schedule.every(interval).minutes.do(poll_strava)
+    if strava_enabled:
+        schedule.every(interval).minutes.do(poll_strava)
     schedule.every().day.at("00:05").do(_daily_fitness_recalc)
 
-    print(f"[main] Polling Strava every {interval}min, fitness recalc daily at 00:05")
+    print(f"[main] Scheduler ready (Strava={'on' if strava_enabled else 'off'})")
 
-    # Run once immediately
-    poll_strava()
+    if strava_enabled:
+        # Run once immediately
+        poll_strava()
 
-    while True:
-        schedule.run_pending()
-        time.sleep(30)
+    Thread(target=_scheduler_loop, daemon=True).start()
+
+    host = os.environ.get("WEB_HOST", "0.0.0.0")
+    port = int(os.environ.get("WEB_PORT", "8080"))
+    print(f"[main] FIT import UI available at http://{host}:{port}/imports/fit")
+    run_server(host, port)
 
 
 def run_reclassify():
