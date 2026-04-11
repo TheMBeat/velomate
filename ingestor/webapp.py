@@ -40,7 +40,14 @@ def _store_pending(parsed: dict) -> str:
 
 def _save_import(token: str) -> tuple[int, int]:
     with _PENDING_IMPORTS_LOCK:
-        pending = _PENDING_IMPORTS.pop(token, None)
+        pending = _PENDING_IMPORTS.get(token)
+        if pending:
+            now = datetime.now(timezone.utc)
+            if now - pending["created_at"] > _PENDING_TTL:
+                _PENDING_IMPORTS.pop(token, None)
+                pending = None
+            else:
+                pending = _PENDING_IMPORTS.pop(token, None)
     if not pending:
         raise KeyError("Unknown or expired import token")
 
@@ -148,7 +155,14 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path in ("/api/imports/fit/confirm", "/imports/fit/confirm"):
             if self.path.startswith("/api/"):
                 raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
-                payload = json.loads(raw or b"{}")
+                try:
+                    payload = json.loads(raw or b"{}")
+                except json.JSONDecodeError:
+                    self._json(400, {"error": "Invalid JSON body"})
+                    return
+                if not isinstance(payload, dict):
+                    self._json(400, {"error": "JSON body must be an object"})
+                    return
                 token = payload.get("import_token", "")
             else:
                 raw = self.rfile.read(int(self.headers.get("Content-Length", "0"))).decode("utf-8")

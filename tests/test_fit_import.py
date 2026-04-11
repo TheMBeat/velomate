@@ -1,5 +1,6 @@
 """Tests for FIT parsing and FIT upload flow."""
 
+import io
 from datetime import datetime, timezone
 from pathlib import Path
 import sys
@@ -128,3 +129,32 @@ def test_save_import_token_consumed_once():
 
     with pytest.raises(KeyError):
         webapp._save_import(token)
+
+
+def test_save_import_rejects_expired_token():
+    expired = datetime.now(timezone.utc) - webapp._PENDING_TTL - webapp.timedelta(seconds=1)
+    token = "expired-token"
+    with webapp._PENDING_IMPORTS_LOCK:
+        webapp._PENDING_IMPORTS[token] = {"created_at": expired, "parsed": {"preview": {}, "activity": {"source_system": "fit_upload"}, "streams": []}}
+
+    with pytest.raises(KeyError):
+        webapp._save_import(token)
+
+    with webapp._PENDING_IMPORTS_LOCK:
+        assert token not in webapp._PENDING_IMPORTS
+
+
+def test_api_confirm_invalid_json_returns_400():
+    handler = webapp._Handler.__new__(webapp._Handler)
+    handler.path = "/api/imports/fit/confirm"
+    bad_payload = b"{"
+    handler.headers = {"Content-Length": str(len(bad_payload))}
+    handler.rfile = io.BytesIO(bad_payload)
+    handler.wfile = io.BytesIO()
+    handler.command = "POST"
+    handler.request_version = "HTTP/1.1"
+
+    with patch.object(handler, "_json") as send_json:
+        handler.do_POST()
+
+    send_json.assert_called_once_with(400, {"error": "Invalid JSON body"})
