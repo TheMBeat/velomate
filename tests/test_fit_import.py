@@ -112,3 +112,37 @@ def test_persistence_and_source_tagging():
     assert upsert_activity.call_args.args[1]["source_system"] == "fit_upload"
     upsert_streams.assert_called_once()
     recalc.assert_called_once()
+
+
+def test_expired_token_rejected_on_confirm():
+    token = "expired-token"
+    webapp._PENDING_IMPORTS[token] = {
+        "created_at": datetime(2020, 1, 1, tzinfo=timezone.utc),
+        "parsed": {"preview": {}, "activity": {}, "streams": []},
+    }
+
+    with pytest.raises(KeyError):
+        webapp._save_import(token)
+
+
+def test_confirm_token_can_only_be_used_once():
+    token = webapp._store_pending(
+        {
+            "preview": {},
+            "activity": {"name": "upload.fit", "source_system": "fit_upload", "strava_id": None},
+            "streams": [{"time_offset": 0}],
+        }
+    )
+
+    mock_conn = MagicMock()
+    with (
+        patch("webapp.get_connection", return_value=mock_conn),
+        patch("webapp.upsert_activity", return_value=(321, False)),
+        patch("webapp.upsert_streams"),
+        patch("webapp.recalculate_fitness"),
+    ):
+        first = webapp._save_import(token)
+
+    assert first[0] == 321
+    with pytest.raises(KeyError):
+        webapp._save_import(token)
