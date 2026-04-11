@@ -1,3 +1,5 @@
 psycopg2-binary~=2.9
 requests~=2.32
 schedule~=1.2
+
+fitparse~=1.2
