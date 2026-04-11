@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>VeloMate • Apple HR + FIT Merger</title>
+  <link rel="stylesheet" href="/static/fit_hr_merge.css" />
+</head>
+<body>
+  <main class="container">
+    <h1>Apple HR + FIT Merger</h1>
+    <p class="subtitle">Merge Apple Health heart-rate points into an existing FIT activity timeline.</p>
+
+    <section class="card">
+      <h2>Upload</h2>
+      <form id="previewForm">
+        <label>FIT activity file<input type="file" name="fit_file" accept=".fit" required /></label>
+        <label>Apple HR export file<input type="file" name="apple_hr_file" accept=".json,.csv" required /></label>
+        <label>Apple source type
+          <select name="source_type">
+            <option value="auto">Auto-detect</option>
+            <option value="json">JSON</option>
+            <option value="csv">CSV</option>
+          </select>
+        </label>
+        <button type="submit">Preview</button>
+      </form>
+      <div id="messages"></div>
+    </section>
+
+    <section id="previewSection" class="card hidden">
+      <h2>Preview</h2>
+      <div id="previewGrid" class="grid"></div>
+      <ul id="warnings"></ul>
+    </section>
+
+    <section id="optionsSection" class="card hidden">
+      <h2>Merge options</h2>
+      <label>Tolerance (seconds)<input type="number" id="tolerance" value="2" min="0" max="30" /></label>
+      <label><input type="checkbox" id="overwrite" /> Overwrite existing FIT HR</label>
+      <label><input type="checkbox" id="ignoreImplausible" checked /> Ignore implausible HR values</label>
+      <div class="row">
+        <label>Min HR<input type="number" id="minHr" value="30" min="1" max="240" /></label>
+        <label>Max HR<input type="number" id="maxHr" value="240" min="30" max="260" /></label>
+      </div>
+      <label>Output filename<input type="text" id="outputName" value="ride_merged_hr.fit" /></label>
+      <button id="runMerge" type="button">Run merge</button>
+    </section>
+
+    <section id="resultSection" class="card hidden">
+      <h2>Result</h2>
+      <div id="resultGrid" class="grid"></div>
+      <button id="downloadBtn" type="button">Download merged FIT</button>
+    </section>
+  </main>
+  <script src="/static/fit_hr_merge.js"></script>
+</body>
+</html>

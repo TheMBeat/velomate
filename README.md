@@ -197,6 +197,53 @@ cp config.example.yaml ~/.config/velomate/config.yaml
 
 Credentials support three methods: direct values, environment variables, or shell commands (`password_cmd`) for secret managers like Keychain, 1Password, or Vault.
 
+
+## Apple HR + FIT Merger (MVP)
+
+A lightweight web utility is included for per-workout enrichment of FIT files with Apple Health heart-rate exports.
+
+### What it does
+1. Upload one source `.fit` activity file.
+2. Upload one Apple Health export file (`.json` or `.csv`, auto-detect supported).
+3. Preview FIT and Apple HR summaries + overlap warnings.
+4. Configure merge options (tolerance, overwrite behavior, plausible HR bounds).
+5. Generate a downloadable merged FIT file (example: `ride_merged_hr.fit`).
+6. Review validation/coverage stats.
+
+### What it does **not** do
+- No write-back to Apple Health.
+- No direct mutation of existing VeloMate DB activities.
+- No live sync.
+- No multi-workout auto matching.
+
+### Merge rules
+- FIT is the master source for timeline/records.
+- No new FIT record samples are invented.
+- Apple HR is mapped only onto existing FIT timestamps (UTC nearest-neighbor, default ±2s).
+- Existing FIT HR is preserved by default; optional overwrite is available.
+- Implausible HR filtering defaults to `30–240 bpm`.
+
+### Recommended flow
+1. Export FIT from your recording platform.
+2. Export Apple Health HR (Auto Health Export JSON/CSV).
+3. Merge via `/tools/fit-hr-merge`.
+4. Import merged FIT into VeloMate's FIT ingestion flow.
+
+### Run the merger utilities
+```bash
+# install optional merger dependencies
+pip install .[tools]
+
+# web UI
+velomate-hr-merge-web
+# open http://localhost:8080/tools/fit-hr-merge
+
+# or CLI
+velomate-hr-merge --fit ride.fit --apple-hr apple_hr.json --output ride_merged_hr.fit
+```
+
+For implementation details and MVP limits, see `docs/apple-hr-merger-design.md`.
+
 ## CLI Usage
 
 ```bash

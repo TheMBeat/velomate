@@ -20,9 +20,15 @@ dependencies = [
 dev = [
     "pytest~=8.0",
 ]
+tools = [
+    "flask~=3.0",
+    "fit-tool~=0.9",
+]
 
 [project.scripts]
 velomate = "velomate.cli:main"
+velomate-hr-merge-web = "velomate.tools.web:main"
+velomate-hr-merge = "velomate.tools.hr_merge_cli:main"
 
 [tool.setuptools.packages.find]
 include = ["velomate*"]
