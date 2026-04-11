@@ -37,6 +37,9 @@ def create_schema(conn):
                 calories        INTEGER,
                 suffer_score    INTEGER,
                 device          TEXT,
+                source_system   TEXT,
+                source_external_id TEXT,
+                source_file_name TEXT,
                 synced_at       TIMESTAMPTZ
             );
 
@@ -110,6 +113,9 @@ def create_schema(conn):
             ALTER TABLE activities ADD COLUMN IF NOT EXISTS variability_index FLOAT;
             ALTER TABLE activities ADD COLUMN IF NOT EXISTS aerobic_decoupling FLOAT;
             ALTER TABLE activities ADD COLUMN IF NOT EXISTS ride_weight FLOAT;
+            ALTER TABLE activities ADD COLUMN IF NOT EXISTS source_system TEXT;
+            ALTER TABLE activities ADD COLUMN IF NOT EXISTS source_external_id TEXT;
+            ALTER TABLE activities ADD COLUMN IF NOT EXISTS source_file_name TEXT;
 
             CREATE INDEX IF NOT EXISTS idx_activities_date ON activities(date);
             CREATE INDEX IF NOT EXISTS idx_activity_streams_activity_id ON activity_streams(activity_id);
@@ -220,11 +226,13 @@ def _do_insert(conn, data: dict, now) -> int:
                 strava_id, name, date, distance_m, duration_s, elevation_m,
                 avg_hr, max_hr, avg_power, max_power, avg_cadence,
                 avg_speed_kmh, calories, suffer_score, device,
+                source_system, source_external_id, source_file_name,
                 is_indoor, sport_type, synced_at
             ) VALUES (
                 %(strava_id)s, %(name)s, %(date)s, %(distance_m)s, %(duration_s)s, %(elevation_m)s,
                 %(avg_hr)s, %(max_hr)s, %(avg_power)s, %(max_power)s, %(avg_cadence)s,
                 %(avg_speed_kmh)s, %(calories)s, %(suffer_score)s, %(device)s,
+                %(source_system)s, %(source_external_id)s, %(source_file_name)s,
                 %(is_indoor)s, %(sport_type)s, %(synced_at)s
             )
             ON CONFLICT (strava_id) DO UPDATE SET
@@ -241,6 +249,9 @@ def _do_insert(conn, data: dict, now) -> int:
                 calories = EXCLUDED.calories,
                 suffer_score = EXCLUDED.suffer_score,
                 device = EXCLUDED.device,
+                source_system = COALESCE(EXCLUDED.source_system, activities.source_system),
+                source_external_id = COALESCE(EXCLUDED.source_external_id, activities.source_external_id),
+                source_file_name = COALESCE(EXCLUDED.source_file_name, activities.source_file_name),
                 is_indoor = EXCLUDED.is_indoor,
                 sport_type = EXCLUDED.sport_type,
                 synced_at = EXCLUDED.synced_at
@@ -255,6 +266,9 @@ def upsert_activity(conn, data: dict) -> tuple[int, bool]:
     """
     now = datetime.now(timezone.utc)
     data = classify_activity(data)
+    data.setdefault("source_system", None)
+    data.setdefault("source_external_id", None)
+    data.setdefault("source_file_name", None)
 
     # Duplicate detection: check if another activity started within 5 min with similar duration
     if data.get("date") and data.get("duration_s"):
