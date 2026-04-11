@@ -45,3 +45,11 @@ def test_report_generation_fields_present():
     hr = [HrPoint(timestamp=_dt("2026-04-10T12:00:00Z"), hr=150)]
     _, report = merge_fit_with_hr(fit, hr, MergeOptions())
     assert set(["coverage_pct", "first_hr_timestamp_used", "last_hr_timestamp_used"]).issubset(report.keys())
+
+
+def test_interpolation_strategy_reserved():
+    fit = [FitRecord(timestamp=_dt("2026-04-10T12:00:00Z"))]
+    hr = [HrPoint(timestamp=_dt("2026-04-10T12:00:00Z"), hr=150)]
+    import pytest
+    with pytest.raises(NotImplementedError):
+        merge_fit_with_hr(fit, hr, MergeOptions(strategy="interpolate"))

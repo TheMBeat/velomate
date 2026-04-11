@@ -33,3 +33,12 @@
 ## Reusability
 - Core merge logic is a pure function (`merge_fit_with_hr`) with no web/CLI coupling.
 - Web and CLI adapters both call the same merge engine and parser/fit I/O layers.
+
+
+## Simplified module structure
+- `velomate.tools.merger.core`: pure merge engine and reporting.
+- `velomate.tools.merger.matching`: timestamp matching strategies (`nearest` default, interpolation reserved).
+- `velomate.tools.merger.apple_parser`: Apple export parsing + normalization (`workouts[].heartRateData` + `Avg`).
+- `velomate.tools.merger.service`: use-case orchestration for preview + merge execution.
+- `velomate.tools.hr_merge_cli` and `velomate.tools.web`: thin adapters over service layer.
+- `ingestor.fit_importer`: FIT -> internal activity model only (independent from merger).

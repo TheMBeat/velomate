@@ -33,7 +33,7 @@ def test_run_handles_fit_io_error(monkeypatch):
     def boom(_):
         raise web_mod.FitIoError("FIT support requires optional dependency 'fit-tool'.")
 
-    monkeypatch.setattr(web_mod, "parse_fit_records", boom)
+    monkeypatch.setattr(web_mod, "execute_merge", boom)
     payload = {
         "fit_b64": base64.b64encode(b"fit").decode("ascii"),
         "hr_b64": base64.b64encode(b"[]").decode("ascii"),

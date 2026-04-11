@@ -28,3 +28,10 @@ def test_parse_auto_health_export_heart_rate_data_avg():
     assert len(points) == 1
     assert points[0].hr == 126
     assert points[0].timestamp.isoformat() == "2026-04-11T07:01:06+00:00"
+
+
+def test_parse_nested_workouts_heart_rate_data():
+    raw = b'{"workouts":[{"id":"w1","heartRateData":[{"date":"2026-04-11 09:01:06 +0200","Avg":126,"units":"bpm"}]}]}'
+    points = parse_apple_json(raw)
+    assert len(points) == 1
+    assert points[0].hr == 126
