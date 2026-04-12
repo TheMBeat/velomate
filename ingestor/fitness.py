@@ -238,6 +238,387 @@ def estimate_ftp(conn) -> int:
     return DEFAULT_FTP
 
 
+# CP/W' standard duration buckets (seconds) — sweet spot for the
+# Monod-Scherrer model. Sub-60s is dominated by neuromuscular factors,
+# >20min has insufficient density in most riders' data.
+CP_DURATIONS = [60, 120, 300, 600, 1200]
+
+
+def fit_period(conn, days: int) -> tuple[float | None, float | None, float | None, list[int]]:
+    """Fit Monod-Scherrer for activities in the last `days` days.
+
+    Returns (cp_watts, w_prime_kj, r_squared, durations_present) where
+    durations_present is the list of CP_DURATIONS buckets that had at
+    least one ride contributing a max effort.
+
+    Returns (None, None, None, []) when:
+    - No power-stream rides in the window
+    - fit_monod_scherrer rejects the fit (degenerate or non-physiological)
+    """
+    from critical_power import compute_mean_maximal_power, fit_monod_scherrer
+
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT a.id FROM activities a
+            WHERE a.date >= CURRENT_DATE - %s * interval '1 day'
+              AND EXISTS (
+                  SELECT 1 FROM activity_streams s
+                  WHERE s.activity_id = a.id AND s.power IS NOT NULL
+              )
+        """, (days,))
+        activity_ids = [row[0] for row in cur.fetchall()]
+
+    if not activity_ids:
+        return (None, None, None, [])
+
+    period_max = {}
+    for act_id in activity_ids:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT power FROM activity_streams
+                WHERE activity_id = %s AND power IS NOT NULL
+                ORDER BY time_offset
+            """, (act_id,))
+            powers = [float(row[0]) for row in cur.fetchall()]
+
+        for duration in CP_DURATIONS:
+            mmp = compute_mean_maximal_power(powers, duration)
+            if mmp is None:
+                continue
+            if duration not in period_max or mmp > period_max[duration]:
+                period_max[duration] = mmp
+
+    if len(period_max) < 2:
+        return (None, None, None, list(period_max.keys()))
+
+    efforts = sorted(period_max.items())
+    cp, w_prime_kj, r2 = fit_monod_scherrer(efforts)
+    return (cp, w_prime_kj, r2, sorted(period_max.keys()))
+
+
+def compute_cp_estimate(
+    conn,
+    fallback_ftp: int | None = None,
+) -> tuple[str, float, float | None, float | None, int | None] | None:
+    """Compute today's CP estimate and persist to cp_estimates + sync_state.
+
+    Tries 90-day window first, then 180-day fallback, then falls back to
+    the existing rolling 20-min x 0.95 estimate (estimate_ftp). Always
+    populates cp_estimates.fallback_ftp regardless of which source wins,
+    so the user can compare directly.
+
+    Args:
+        conn: psycopg2 connection.
+        fallback_ftp: precomputed rolling 20-min x 0.95 value to avoid
+            redundant DB queries. If None, computes via estimate_ftp(conn).
+            Pass the auto_ftp variable from recalculate_fitness here so the
+            existing call site is reused.
+
+    Returns the chosen tuple (source, value, w_prime_kj, r_squared, period_days)
+    or None when there is no data at all to act on.
+    """
+    from critical_power import assess_fit_quality
+    import db as _db
+
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT 1 FROM activity_streams WHERE power IS NOT NULL LIMIT 1
+        """)
+        if cur.fetchone() is None:
+            print("[fitness] No power streams — skipping CP estimate")
+            return None
+
+    if fallback_ftp is None:
+        fallback_ftp = estimate_ftp(conn)
+    fallback = fallback_ftp
+
+    cp_90, wp_90, r2_90, durations_90 = fit_period(conn, days=90)
+    if assess_fit_quality(r2_90, len(durations_90)):
+        result = ("cp", cp_90, wp_90, r2_90, 90)
+        chosen_duration_count = len(durations_90)
+    else:
+        cp_180, wp_180, r2_180, durations_180 = fit_period(conn, days=180)
+        if assess_fit_quality(r2_180, len(durations_180)):
+            result = ("cp", cp_180, wp_180, r2_180, 180)
+            chosen_duration_count = len(durations_180)
+        elif fallback is not None:
+            result = ("20min_fallback", float(fallback), None, None, None)
+            chosen_duration_count = None
+        else:
+            print("[fitness] CP fit failed and fallback FTP unavailable")
+            return None
+
+    source, value, w_prime_kj, r_squared, period_days = result
+
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO cp_estimates
+                (date, cp_watts, w_prime_kj, r_squared, period_days,
+                 duration_count, source, fallback_ftp, updated_at)
+            VALUES (CURRENT_DATE, %s, %s, %s, %s, %s, %s, %s, NOW())
+            ON CONFLICT (date) DO UPDATE SET
+                cp_watts = EXCLUDED.cp_watts,
+                w_prime_kj = EXCLUDED.w_prime_kj,
+                r_squared = EXCLUDED.r_squared,
+                period_days = EXCLUDED.period_days,
+                duration_count = EXCLUDED.duration_count,
+                source = EXCLUDED.source,
+                fallback_ftp = EXCLUDED.fallback_ftp,
+                updated_at = NOW()
+        """, (
+            value if source == "cp" else None,
+            w_prime_kj,
+            r_squared,
+            period_days,
+            chosen_duration_count,
+            source,
+            fallback,
+        ))
+
+    _db.set_sync_state(conn, "estimated_ftp", str(int(round(value))))
+    _db.set_sync_state(conn, "estimated_ftp_source", source)
+    if w_prime_kj is not None:
+        _db.set_sync_state(conn, "estimated_cp_w_prime_kj", f"{w_prime_kj:.2f}")
+    if r_squared is not None:
+        _db.set_sync_state(conn, "estimated_cp_quality", f"{r_squared:.3f}")
+
+    r2_display = f"{r_squared:.3f}" if r_squared is not None else "n/a"
+    print(f"[fitness] CP estimate: {value:.0f}W (source={source}, R²={r2_display})")
+    return result
+
+
+def compute_wbal_for_rides(conn) -> int:
+    """Compute W'bal for rides that don't have it yet.
+
+    Reads CP/W' from the latest cp_estimates row. For rides with power
+    streams where w_bal IS NULL, computes per-second W'bal via Skiba
+    differential and writes it back to activity_streams.
+
+    Returns the number of rides processed. Returns 0 if no CP estimate
+    is available or no rides need processing.
+    """
+    from critical_power import compute_wbal
+
+    # Get latest CP estimate
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT cp_watts, w_prime_kj, fallback_ftp, source
+            FROM cp_estimates ORDER BY date DESC LIMIT 1
+        """)
+        row = cur.fetchone()
+
+    if row is None:
+        print("[fitness] No CP estimates — skipping W'bal")
+        return 0
+
+    cp_watts, w_prime_kj, fallback_ftp, source = row
+
+    # Determine CP and W' to use
+    if source == "cp" and cp_watts is not None:
+        cp = cp_watts
+    elif fallback_ftp is not None:
+        cp = float(fallback_ftp)
+    else:
+        print("[fitness] No usable CP value — skipping W'bal")
+        return 0
+
+    # W' in joules — use fitted value or 20kJ default (Skiba standard)
+    w_prime_j = (w_prime_kj * 1000.0) if w_prime_kj is not None else 20000.0
+
+    # Find rides with power streams that need W'bal
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT DISTINCT s.activity_id
+            FROM activity_streams s
+            WHERE s.power IS NOT NULL
+              AND s.w_bal IS NULL
+            ORDER BY s.activity_id
+        """)
+        ride_ids = [row[0] for row in cur.fetchall()]
+
+    if not ride_ids:
+        return 0
+
+    count = 0
+    for act_id in ride_ids:
+        try:
+            # Read power stream — COALESCE NULL power to 0 so coasting seconds
+            # are modeled as recovery (0W < CP) rather than creating time gaps.
+            # Matches the project convention: "Includes zero-power (coasting)".
+            # Note: assumes consecutive 1-second samples (same assumption as NP
+            # computation). Gaps in time_offset are not detected.
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT time_offset, COALESCE(power, 0) AS power
+                    FROM activity_streams
+                    WHERE activity_id = %s
+                    ORDER BY time_offset
+                """, (act_id,))
+                rows = cur.fetchall()
+
+            if not rows:
+                continue
+
+            offsets = [r[0] for r in rows]
+            powers = [float(r[1]) for r in rows]
+
+            # Compute W'bal
+            wbal = compute_wbal(powers, cp, w_prime_j)
+
+            # Batch update w_bal for each time_offset
+            updates = [(wbal[i], act_id, offsets[i]) for i in range(len(wbal))]
+            with conn.cursor() as cur:
+                psycopg2.extras.execute_batch(cur, """
+                    UPDATE activity_streams SET w_bal = %s
+                    WHERE activity_id = %s AND time_offset = %s
+                """, updates, page_size=1000)
+        except Exception as e:
+            print(f"[fitness] W'bal failed for activity {act_id} (skipping): {e}")
+            continue
+
+        count += 1
+
+    return count
+
+
+def detect_climbs_for_rides(conn) -> int:
+    """Detect climbs for rides with altitude data that don't have climb rows yet.
+
+    Uses the same 20-second smoothing as the Cadence & Grade panel.
+    Stores detected climbs in the ride_climbs table.
+
+    Returns the number of rides processed.
+    """
+    from climbs import smooth_altitude, detect_climbs
+
+    # Find rides with altitude data that don't have RDP-detected climb rows yet.
+    # Rides may already have Strava segments (source='strava') — that's fine,
+    # we still run detection to find unlisted climbs.
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT DISTINCT s.activity_id
+            FROM activity_streams s
+            WHERE s.altitude_m IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM ride_climbs rc
+                  WHERE rc.activity_id = s.activity_id
+                    AND rc.source IN ('detected', 'none')
+              )
+            ORDER BY s.activity_id
+        """)
+        ride_ids = [row[0] for row in cur.fetchall()]
+
+    if not ride_ids:
+        return 0
+
+    count = 0
+    for act_id in ride_ids:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT time_offset, altitude_m,
+                        COALESCE(speed_kmh, 0) / 3600.0 *
+                          (time_offset - LAG(time_offset, 1, time_offset) OVER (ORDER BY time_offset)) AS dist_delta
+                    FROM activity_streams
+                    WHERE activity_id = %s AND altitude_m IS NOT NULL
+                    ORDER BY time_offset
+                """, (act_id,))
+                rows = cur.fetchall()
+
+            if not rows:
+                # Insert a sentinel so we don't re-check this ride
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO ride_climbs (activity_id, gain_m, category, source)
+                        VALUES (%s, 0, 'none', 'none')
+                    """, (act_id,))
+                continue
+
+            time_offsets = []
+            altitudes_raw = []
+            cum_dist = [0.0]
+            for offset, alt, dist_d in rows:
+                time_offsets.append(offset)
+                altitudes_raw.append(alt)
+                cum_dist.append(cum_dist[-1] + (dist_d if dist_d else 0.0))
+            cum_dist_m = [d * 1000.0 for d in cum_dist[1:]]  # km to m
+
+            # Smooth with 20s window (matches Grade panel)
+            altitudes = smooth_altitude(altitudes_raw, window=20)
+
+            climbs = detect_climbs(altitudes, cum_dist_m, time_offsets=time_offsets)
+            print(f"[fitness] Activity {act_id}: {len(altitudes_raw)} alt samples, range {min(altitudes_raw):.0f}-{max(altitudes_raw):.0f}m, {len(climbs)} climbs detected")
+
+            if climbs:
+                # Get existing Strava segments for this ride to avoid duplicates
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT start_alt, peak_alt FROM ride_climbs
+                        WHERE activity_id = %s AND source = 'strava'
+                    """, (act_id,))
+                    strava_ranges = [(row[0], row[1]) for row in cur.fetchall()]
+
+                with conn.cursor() as cur:
+                    inserted = 0
+                    for c in climbs:
+                        # Skip if this detected climb overlaps a Strava segment
+                        # (Strava data is more accurate — let it win)
+                        overlaps_strava = False
+                        for s_low, s_high in strava_ranges:
+                            if s_low is not None and s_high is not None:
+                                # Check if altitude ranges overlap by at least 50%.
+                                # Limitation: can false-positive on rides with multiple
+                                # climbs to similar elevations. Unavoidable without
+                                # stream offsets on Strava segments.
+                                overlap_lo = max(c["start_alt"], s_low)
+                                overlap_hi = min(c["peak_alt"], s_high)
+                                overlap = max(0, overlap_hi - overlap_lo)
+                                detected_range = c["peak_alt"] - c["start_alt"]
+                                if detected_range > 0 and overlap / detected_range >= 0.5:
+                                    overlaps_strava = True
+                                    break
+
+                        if overlaps_strava:
+                            continue
+
+                        cur.execute("""
+                            INSERT INTO ride_climbs
+                                (activity_id, start_offset, end_offset, gain_m, length_m,
+                                 avg_grade, start_alt, peak_alt, duration_s, category,
+                                 score, source)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'detected')
+                        """, (
+                            act_id, time_offsets[c["start_idx"]], time_offsets[c["end_idx"]], c["gain_m"],
+                            c["length_m"], c["avg_grade"], c["start_alt"],
+                            c["peak_alt"], c["duration_s"], c["category"], c["score"],
+                        ))
+                        inserted += 1
+
+                    if not inserted:
+                        # No detected climbs survived (either none found or all
+                        # overlapped Strava segments). Insert sentinel to mark
+                        # detection as completed — prevents re-processing loop.
+                        cur.execute("""
+                            INSERT INTO ride_climbs (activity_id, gain_m, category, source)
+                            VALUES (%s, 0, 'none', 'none')
+                        """, (act_id,))
+            else:
+                # No climbs detected — insert sentinel to mark detection as
+                # completed, regardless of whether Strava segments exist.
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO ride_climbs (activity_id, gain_m, category, source)
+                        VALUES (%s, 0, 'none', 'none')
+                    """, (act_id,))
+
+            count += 1
+        except Exception as e:
+            print(f"[fitness] Climb detection failed for activity {act_id} (skipping): {e}")
+            continue
+
+    return count
+
+
 def recalculate_fitness(conn):
     """
     Walk day-by-day from earliest activity, applying EMA:
@@ -308,8 +689,11 @@ def recalculate_fitness(conn):
             # ride_weight intentionally excluded — it's user-configured, not derived.
             # Historical rides preserve their stamped weight across version bumps.
             cur.execute("UPDATE activities SET tss = NULL, np = NULL, ef = NULL, work_kj = NULL, ride_ftp = NULL, intensity_factor = NULL, trimp = NULL, variability_index = NULL, aerobic_decoupling = NULL")
+            cur.execute("UPDATE activity_streams SET w_bal = NULL WHERE w_bal IS NOT NULL")
             cur.execute("DELETE FROM athlete_stats")
             cur.execute("DELETE FROM ride_intervals")
+            # Preserve Strava segments (external data), only reset our detection
+            cur.execute("DELETE FROM ride_climbs WHERE source != 'strava'")
         _db.set_sync_state(conn, "metrics_version", METRICS_VERSION)
 
     # Step 1: Compute NP, EF, Work for activities with power stream data
@@ -622,5 +1006,44 @@ def recalculate_fitness(conn):
         raise
     finally:
         conn.autocommit = True
+
+    # Step 6: Compute CP/W' estimate (graceful fallback to existing rolling
+    # 20-min x 0.95 when fit quality is poor). Pass auto_ftp through so
+    # compute_cp_estimate doesn't redundantly recompute it — the value is
+    # already in scope from the FTP resolution at line 274 of this function
+    # (unconditional assignment: auto_ftp = estimate_ftp(conn)).
+    print("[fitness] Computing CP / W' estimate...")
+    try:
+        compute_cp_estimate(conn, fallback_ftp=auto_ftp)
+    except Exception as e:
+        print(f"[fitness] CP estimate failed (non-fatal): {e}")
+
+    # Step 7: Compute W'bal for rides missing it
+    print("[fitness] Computing W'bal...")
+    try:
+        wbal_count = compute_wbal_for_rides(conn)
+        if wbal_count > 0:
+            print(f"[fitness] Computed W'bal for {wbal_count} rides")
+    except Exception as e:
+        print(f"[fitness] W'bal computation failed (non-fatal): {e}")
+
+    # Step 8a: Backfill Strava segments for rides that don't have them
+    print("[fitness] Backfilling Strava segments...")
+    try:
+        from strava import backfill_strava_segments
+        seg_count = backfill_strava_segments(conn)
+        if seg_count > 0:
+            print(f"[fitness] Backfilled Strava segments for {seg_count} rides")
+    except Exception as e:
+        print(f"[fitness] Strava segment backfill failed (non-fatal): {e}")
+
+    # Step 8b: Detect climbs for rides with altitude data that don't have climb rows yet
+    print("[fitness] Detecting climbs...")
+    try:
+        climb_count = detect_climbs_for_rides(conn)
+        if climb_count > 0:
+            print(f"[fitness] Detected climbs for {climb_count} rides")
+    except Exception as e:
+        print(f"[fitness] Climb detection failed (non-fatal): {e}")
 
     print(f"[fitness] Calculated {count} days of fitness data (CTL={ctl:.1f}, ATL={atl:.1f}, TSB={ctl-atl:.1f})")

@@ -99,6 +99,12 @@ def cmd_plan(args):
     print(result)
 
 
+def cmd_auth(args):
+    """Authorize VeloMate with Strava via OAuth."""
+    from velomate.auth import authorize
+    authorize()
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="velomate",
@@ -116,17 +122,22 @@ def main():
     plan_parser.add_argument("--loop", "-l", action="store_true", default=None, help="Round-trip route")
     plan_parser.add_argument("--no-loop", action="store_false", dest="loop", help="One-way route")
     plan_parser.add_argument("--waypoints", "-w", default=None, help="Semicolon-separated locations to route through")
-    plan_parser.add_argument("--date", default="tomorrow", help="When to ride (default: tomorrow)")
+    plan_parser.add_argument("--date", default="today", help="When to ride (default: today)")
     plan_parser.add_argument("--time", "-t", default=None, help="Start time (e.g. 14:00, 2pm, 9am)")
     plan_parser.add_argument("--start", default=None, help="Start location as 'lat,lng' (default: from config)")
     plan_parser.add_argument("--preference", "-p", default="variety", choices=["variety", "comfort"], help="Route preference: variety (new roads) or comfort (familiar roads)")
     plan_parser.add_argument("--safety", default=0.5, type=float, help="Safety level 0.0-1.0: 0=fastest, 0.5=balanced, 1.0=safest (default: 0.5)")
     plan_parser.add_argument("--output", "-o", default=None, metavar="DIR", help="Save preview HTML to this directory instead of opening in browser")
 
+    # Auth subcommand
+    subparsers.add_parser("auth", help="Authorize VeloMate with your Strava account")
+
     args = parser.parse_args()
 
     if args.command == "plan":
         cmd_plan(args)
+    elif args.command == "auth":
+        cmd_auth(args)
     elif args.command is None:
         cmd_recommend(args)
     else:

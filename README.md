@@ -167,16 +167,15 @@ cp .env.example .env
 ### 2. Get a Strava refresh token
 
 ```bash
-# Open in browser (replace YOUR_CLIENT_ID):
-# https://www.strava.com/oauth/authorize?client_id=YOUR_CLIENT_ID&response_type=code&redirect_uri=http://localhost&approval_prompt=force&scope=activity:read_all
+# Set your Strava API credentials (from https://www.strava.com/settings/api)
+export STRAVA_CLIENT_ID=your_client_id
+export STRAVA_CLIENT_SECRET=your_client_secret
 
-# After authorizing, exchange the code:
-curl -X POST https://www.strava.com/oauth/token \
-  -d client_id=YOUR_CLIENT_ID \
-  -d client_secret=YOUR_CLIENT_SECRET \
-  -d code=CODE_FROM_REDIRECT \
-  -d grant_type=authorization_code
-# Use the refresh_token from the response
+# Run the auth flow
+python3 -m velomate.cli auth
+
+# Follow the prompts: open the URL, approve on Strava, paste the redirect URL back.
+# Add the printed refresh token to your .env file.
 ```
 
 ### 3. Start services
@@ -284,6 +283,8 @@ TSB       = CTL − ATL                 (training stress balance / form)
 - **Max HR**: 95th percentile of ride max HRs, or configured via `VELOMATE_MAX_HR`. Used for Banister TRIMP
 - **LTHR (Lactate Threshold HR)**: derived as ~89% of max HR per Friel convention. Used as the threshold value in HR-based TSS when no power stream is available
 - **W/kg**: NP / ride_weight. Uses NP (not avg_power) because it better reflects the physiological cost of variable efforts. Per-ride `ride_weight` stored from `VELOMATE_WEIGHT` — historical rides preserve their weight if the setting changes later. Shown on Activity Details and as NP/kg Trend on All Time Progression
+- **CP / W'**: Critical Power and W' modeled via Monod-Scherrer fit on mean maximal power at standard durations. Replaces rolling 20-min x 0.95 as the algorithmic FTP estimate when fit quality is good (R² >= 0.9). Graceful fallback to the old method when data is sparse. CP is the aerobic ceiling, W' is the anaerobic reservoir
+- **W'bal**: Per-second anaerobic battery gauge computed via Skiba differential model. Shows when you drained your reservoir, how close to empty you got, and where it refilled. Displayed on Activity Details alongside the power trace
 - **Auto interval detection**: Coggan-style classification (sprint / anaerobic / vo2 / threshold / sweetspot / tempo) from the power stream, stored in the `ride_intervals` table. Classification uses per-ride FTP for historical accuracy
 - **TSB interpretation**: > +10 fresh · -10 to +10 neutral · < -10 fatigued
 
@@ -311,7 +312,7 @@ Configured via `.env` file:
 | `POSTGRES_PASSWORD` | Yes | Database password |
 | `STRAVA_CLIENT_ID` | Yes | From strava.com/settings/api |
 | `STRAVA_CLIENT_SECRET` | Yes | From Strava API settings |
-| `STRAVA_REFRESH_TOKEN` | Yes | OAuth refresh token |
+| `STRAVA_REFRESH_TOKEN` | Yes | OAuth refresh token (get via `python3 -m velomate.cli auth`) |
 | `GRAFANA_PASSWORD` | Yes | Grafana admin password |
 | `VELOMATE_MAX_HR` | No | Your max heart rate (0 = auto-estimate) |
 | `VELOMATE_FTP` | No | Your FTP in watts (0 = auto-estimate) |

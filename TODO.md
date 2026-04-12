@@ -9,9 +9,9 @@ Prioritised backlog. Full rationale for all items lives in `docs/features-analys
 ## 📋 Backlog
 
 ### High — Cluster B: Performance Modeling
-- [ ] CP/W' model with Monod-Scherrer + Morton fits — new `ingestor/critical_power.py` + `cp_estimates` table + CP/W' panel on All Time Progression (gap #3)
-- [ ] W'bal time series per ride — Skiba differential on stream + new Activity Details panel (gap #4, depends on CP/W')
-- [ ] Fresh vs fatigued PD curves — Grafana SQL segmenting by CTL bucket + Durability Index stat (gap #5)
+- [x] CP/W' foundation (#108) — Monod-Scherrer 2-parameter fit via numpy.polyfit (no scipy). Quality gate R² >= 0.9 AND >= 4/5 durations. Graceful fallback 90d → 180d → rolling 20-min × 0.95. New `ingestor/critical_power.py` pure-function module, `cp_estimates` table, CP/W' Progression + Power-Duration Curve panels on All Time Progression. Replaces rolling 20-min as the source of `sync_state.estimated_ftp` when fit quality is good. No TSS impact (configured FTP still wins).
+- [x] W'bal time series per ride (#111) — Skiba differential model with GoldenCheetah tau. Per-second w_bal column on activity_streams. Uses latest CP/W' from cp_estimates, defaults W' to 20kJ on fallback. W'bal timeseries + Min W'bal + Time below 25% panels on Activity Details. Per-ride error isolation. COALESCE(power, 0) for coasting.
+- [x] Durability Profile + Durability Index (#112) — within-ride 1st-half vs 2nd-half best efforts at 5 durations + Durability Index stat (5-min power ratio, threshold-coloured). Pure Grafana SQL, no ingestor changes. CTL-segmented cross-ride version deferred until dataset grows.
 
 ### High — Cluster C: Recovery & Wellness
 - [ ] Wellness diary schema + CLI entry (`velomate wellness today --rhr ... --sleep ...`) (gap #2 phase 1)
@@ -21,14 +21,14 @@ Prioritised backlog. Full rationale for all items lives in `docs/features-analys
 ### Medium
 - [ ] Daily "ride today" recommendation extending `cmd_recommend` with form-zone annotation (gap #8)
 - [ ] Equipment tracking — bikes + components + mileage + wear alerts (gap #7)
-- [ ] Climb categorisation (HC/Cat 1–4) from GPS elevation (gap #10)
-- [ ] Training Monotony & Strain (Foster) on `athlete_stats` + overreaching warning panel (gap #9)
-- [ ] eFTP auto-update from single maximal efforts (gap #11)
-- [ ] OAuth browser flow for Strava — `velomate auth` CLI command (gap #12)
+- [x] Climb categorisation (HC/Cat 1–4) from GPS elevation — Detected Climbs table on Activity Details with category/gain/length/grade/duration. 30s smoothed altitude, 50m minimum gain. Pure Grafana SQL.
+- [x] Training Monotony & Strain (Foster) — Monotony + Strain stat cards on Overview after CTL chart. Monotony = mean/stdev of daily TSS over 7 days. Strain = weekly TSS × Monotony. Threshold-coloured (green/yellow/red). Pure Grafana SQL.
+- [x] OAuth browser flow for Strava (#117) — `velomate auth` CLI command. Manual paste flow, no port forwarding needed.
 - [ ] Direct FIT file import — bypass Strava for offline rides (gap #13)
 
 ### Low
 - [ ] Athlete type classification from CP/W'/Pmax (gap #17 — nearly free after CP/W')
+- [ ] eFTP auto-update from single maximal efforts (gap #11) — CP covers the algorithmic estimate; this is for athletes doing deliberate FTP tests where a single breakthrough effort should update the estimate immediately
 - [ ] PR notifications + durability PRs (best power after ≥1000kJ) (gap #14)
 - [ ] VO2max estimate from HR + power (populates unused `athlete_stats.vo2max` column) (gap #15)
 - [ ] User-defined computed fields via YAML config (gap #16)
