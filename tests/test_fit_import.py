@@ -186,3 +186,24 @@ def test_api_merge_run_parses_string_boolean_flags():
     assert options.overwrite_existing_hr is False
     assert options.ignore_implausible_hr is False
     send_json.assert_called_once_with(200, {"ok": True})
+
+
+def test_api_merge_run_passes_matching_strategy_option():
+    handler = webapp._Handler.__new__(webapp._Handler)
+    handler.path = "/api/tools/fit-hr-merge/run"
+    payload = b'{"import_token":"t","matching_strategy":"interpolate"}'
+    handler.headers = {"Content-Length": str(len(payload))}
+    handler.rfile = io.BytesIO(payload)
+    handler.wfile = io.BytesIO()
+    handler.command = "POST"
+    handler.request_version = "HTTP/1.1"
+
+    with (
+        patch.object(handler, "_json") as send_json,
+        patch("webapp._run_hr_merge", return_value={"ok": True}) as run_merge,
+    ):
+        handler.do_POST()
+
+    options = run_merge.call_args.args[1]
+    assert options.matching_strategy == "interpolate"
+    send_json.assert_called_once_with(200, {"ok": True})

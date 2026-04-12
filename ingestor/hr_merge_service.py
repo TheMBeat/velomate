@@ -35,6 +35,7 @@ def parse_merge_options(payload: dict) -> MergeOptions:
         ignore_implausible_hr=parse_bool_flag(payload.get("ignore_implausible_hr", True), default=True),
         min_hr=int(payload.get("min_hr", 30)),
         max_hr=int(payload.get("max_hr", 240)),
+        matching_strategy=str(payload.get("matching_strategy", "nearest")),
     )
 
 
