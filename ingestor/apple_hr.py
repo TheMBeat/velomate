@@ -83,6 +83,18 @@ def _iter_json_candidates(payload):
             value = payload.get(key)
             if isinstance(value, list):
                 return value
+            if isinstance(value, dict):
+                workouts = value.get("workouts")
+                if isinstance(workouts, list):
+                    out = []
+                    for workout in workouts:
+                        if not isinstance(workout, dict):
+                            continue
+                        hr_data = workout.get("heartRateData")
+                        if isinstance(hr_data, list):
+                            out.extend(hr_data)
+                    if out:
+                        return out
     return []
 
 

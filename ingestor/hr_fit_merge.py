@@ -11,6 +11,7 @@ import struct
 
 from apple_hr import parse_apple_hr_csv, parse_apple_hr_json, normalize_hr_series
 from fit_import import FitImportError
+from hr_matching import MATCHING_STRATEGIES
 from fitparse import FitFile
 
 
@@ -25,6 +26,7 @@ class MergeOptions:
     ignore_implausible_hr: bool = True
     min_hr: int = 30
     max_hr: int = 240
+    matching_strategy: str = "nearest"
 
 
 FIT_EPOCH = datetime(1989, 12, 31, tzinfo=timezone.utc)
@@ -96,6 +98,9 @@ def merge_fit_with_hr(fit_records: list[dict], hr_series: list[dict], options: M
     )
     if not fit_records:
         raise FitHrMergeError("FIT record set is empty")
+    matcher = MATCHING_STRATEGIES.get(options.matching_strategy)
+    if matcher is None:
+        raise FitHrMergeError(f"Unsupported matching strategy: {options.matching_strategy}")
 
     fit_times = [datetime.fromisoformat(r["timestamp"].replace("Z", "+00:00")) for r in fit_records]
     apple = [{"timestamp": datetime.fromisoformat(s["timestamp"].replace("Z", "+00:00")), "hr": s["hr"]} for s in normalized]
@@ -111,13 +116,7 @@ def merge_fit_with_hr(fit_records: list[dict], hr_series: list[dict], options: M
 
     for idx, rec in enumerate(fit_records):
         ts = fit_times[idx]
-        best = None
-        best_delta = None
-        for sample in in_window:
-            delta = abs((sample["timestamp"] - ts).total_seconds())
-            if delta <= options.tolerance_seconds and (best_delta is None or delta < best_delta):
-                best = sample
-                best_delta = delta
+        best = matcher(ts, in_window, options.tolerance_seconds)
 
         new_rec = dict(rec)
         if best is not None:
