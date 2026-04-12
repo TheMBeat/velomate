@@ -259,7 +259,8 @@ def upsert_activity(conn, data: dict) -> tuple[int, bool]:
     # Duplicate detection: check if another activity started within 5 min with similar duration
     if data.get("date") and data.get("duration_s"):
         duplicate = find_duplicate(conn, data["date"], data["duration_s"], data.get("distance_m", 0))
-        if duplicate and duplicate[1] != data.get("strava_id"):
+        same_strava = data.get("strava_id") is not None and duplicate and duplicate[1] == data.get("strava_id")
+        if duplicate and not same_strava:
             ex_id = duplicate[0]
             merged = merge_activity_data(duplicate, data)
             if merged.get("_skip_insert"):
