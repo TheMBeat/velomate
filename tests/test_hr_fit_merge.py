@@ -88,3 +88,64 @@ def test_rewrite_fit_hr_values_patches_binary_record_hr():
     assert patched == 1
     # final HR byte in the only data message should now be 150
     assert out_bytes[-3] == 150
+
+
+def test_rewrite_fit_hr_values_handles_developer_field_sizes():
+    ts = hr_fit_merge._utc_iso_to_fit_seconds("2026-04-11T07:01:05Z")
+
+    # FIT definition with developer-data bit set and one 2-byte developer field
+    definition = bytes([
+        0x60,  # normal header, definition + developer-data, local msg 0
+        0x00,  # reserved
+        0x00,  # little endian
+        0x14, 0x00,  # global msg number 20
+        0x02,  # 2 standard fields
+        0xFD, 0x04, 0x86,  # field 253 timestamp uint32
+        0x03, 0x01, 0x02,  # field 3 heart_rate uint8
+        0x01,  # 1 developer field definition follows
+        0x00, 0x02, 0x00,  # dev field num, size=2, dev data index
+    ])
+    data_msg = bytes([0x00]) + struct.pack("<I", ts) + bytes([100]) + bytes([0xAA, 0xBB])
+    data = definition + data_msg
+
+    header = bytes([12, 0x10, 0x00, 0x00]) + struct.pack("<I", len(data)) + b".FIT"
+    crc = struct.pack("<H", hr_fit_merge._fit_crc(data))
+    fit_bytes = header + data + crc
+
+    merged_records = [{"timestamp": "2026-04-11T07:01:05Z", "hr": 150}]
+    out_bytes, patched = hr_fit_merge.rewrite_fit_hr_values(fit_bytes, merged_records)
+
+    assert patched == 1
+    assert out_bytes[-5] == 150
+
+
+def test_rewrite_fit_hr_values_uses_per_record_hr_for_duplicate_timestamps():
+    ts = hr_fit_merge._utc_iso_to_fit_seconds("2026-04-11T07:01:05Z")
+
+    definition = bytes([
+        0x40,  # normal header, definition, local msg 0
+        0x00,  # reserved
+        0x00,  # little endian
+        0x14, 0x00,  # global msg number 20
+        0x02,  # 2 fields
+        0xFD, 0x04, 0x86,  # field 253 timestamp uint32
+        0x03, 0x01, 0x02,  # field 3 heart_rate uint8
+    ])
+    msg_1 = bytes([0x00]) + struct.pack("<I", ts) + bytes([100])
+    msg_2 = bytes([0x00]) + struct.pack("<I", ts) + bytes([101])
+    data = definition + msg_1 + msg_2
+
+    header = bytes([12, 0x10, 0x00, 0x00]) + struct.pack("<I", len(data)) + b".FIT"
+    crc = struct.pack("<H", hr_fit_merge._fit_crc(data))
+    fit_bytes = header + data + crc
+
+    merged_records = [
+        {"timestamp": "2026-04-11T07:01:05Z", "hr": 111},
+        {"timestamp": "2026-04-11T07:01:05Z", "hr": 112},
+    ]
+    out_bytes, patched = hr_fit_merge.rewrite_fit_hr_values(fit_bytes, merged_records)
+
+    assert patched == 2
+    payload = out_bytes[12:-2]
+    assert payload[len(definition) + 1 + 4] == 111
+    assert payload[len(definition) + (1 + 4 + 1) + 1 + 4] == 112

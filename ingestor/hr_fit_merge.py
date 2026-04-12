@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
+from collections import defaultdict, deque
 import json
 from io import BytesIO
 import struct
@@ -196,11 +197,12 @@ def rewrite_fit_hr_values(original_fit: bytes, merged_records: list[dict]) -> tu
 
     data = bytearray(original_fit[data_start:data_end])
 
-    target_by_fit_ts = {}
+    target_by_fit_ts: dict[int, deque[int]] = defaultdict(deque)
     for rec in merged_records:
         if rec.get("hr") is None:
             continue
-        target_by_fit_ts[_utc_iso_to_fit_seconds(rec["timestamp"])] = int(rec["hr"])
+        fit_ts = _utc_iso_to_fit_seconds(rec["timestamp"])
+        target_by_fit_ts[fit_ts].append(int(rec["hr"]))
 
     definitions: dict[int, dict] = {}
     pos = 0
@@ -228,8 +230,8 @@ def rewrite_fit_hr_values(original_fit: bytes, merged_records: list[dict]) -> tu
             pos += msg_len
             if defn["global_msg_num"] == 20:
                 _, hr_offset = _extract_record_layout(defn)
-                if hr_offset is not None and ts in target_by_fit_ts:
-                    new_hr = max(0, min(255, target_by_fit_ts[ts]))
+                if hr_offset is not None and target_by_fit_ts.get(ts):
+                    new_hr = max(0, min(255, target_by_fit_ts[ts].popleft()))
                     data[msg_start + hr_offset] = new_hr
                     patched += 1
             continue
@@ -262,7 +264,15 @@ def rewrite_fit_hr_values(original_fit: bytes, merged_records: list[dict]) -> tu
                 if pos >= len(data):
                     raise FitHrMergeError("Truncated developer field definition")
                 num_dev = data[pos]
-                pos += 1 + (num_dev * 3)
+                pos += 1
+                for _ in range(num_dev):
+                    if pos + 3 > len(data):
+                        raise FitHrMergeError("Truncated developer field definition")
+                    _dev_field_num = data[pos]
+                    dev_size = data[pos + 1]
+                    _dev_data_index = data[pos + 2]
+                    total_size += dev_size
+                    pos += 3
             definitions[local_msg_type] = {
                 "global_msg_num": global_msg_num,
                 "fields": fields,
@@ -287,8 +297,8 @@ def rewrite_fit_hr_values(original_fit: bytes, merged_records: list[dict]) -> tu
                 ts_bytes = bytes(data[msg_start + ts_offset: msg_start + ts_offset + 4])
                 ts = _decode_timestamp(ts_bytes, defn["little_endian"])
                 last_timestamp = ts
-                if hr_offset is not None and ts in target_by_fit_ts:
-                    new_hr = max(0, min(255, target_by_fit_ts[ts]))
+                if hr_offset is not None and target_by_fit_ts.get(ts):
+                    new_hr = max(0, min(255, target_by_fit_ts[ts].popleft()))
                     data[msg_start + hr_offset] = new_hr
                     patched += 1
 
