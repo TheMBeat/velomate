@@ -84,14 +84,14 @@ def test_parse_invalid_fit_raises():
 
 def test_upload_preview_success():
     parsed = {"preview": {"source_file_name": "upload.fit"}, "activity": {"source_system": "fit_upload"}, "streams": [{"time_offset": 0}]}
-    with patch("webapp.parse_fit_bytes", return_value=parsed):
+    with patch("webapp.preview_fit_import", return_value=parsed):
         resp = webapp._handle_fit_preview("upload.fit", b"ok")
     assert "import_token" in resp
     assert resp["preview"]["source_file_name"] == "upload.fit"
 
 
 def test_upload_invalid_fit_handling():
-    with patch("webapp.parse_fit_bytes", side_effect=fit_import.FitImportError("Could not parse FIT file")):
+    with patch("webapp.preview_fit_import", side_effect=fit_import.FitImportError("Could not parse FIT file")):
         with pytest.raises(fit_import.FitImportError):
             webapp._handle_fit_preview("broken.fit", b"broken")
 
@@ -99,25 +99,21 @@ def test_upload_invalid_fit_handling():
 def test_persistence_and_source_tagging():
     token = webapp._store_pending({"preview": {}, "activity": {"name": "upload.fit", "source_system": "fit_upload", "strava_id": None}, "streams": [{"time_offset": 0}, {"time_offset": 1}]})
 
-    mock_conn = MagicMock()
     with (
-        patch("webapp.get_connection", return_value=mock_conn),
-        patch("webapp.import_fit_payload", return_value=(123, 2)) as import_payload,
+        patch("webapp.persist_fit_import", return_value=(123, 2)) as persist_fit_import,
     ):
         activity_id, sample_count = webapp._save_import(token)
 
     assert activity_id == 123
     assert sample_count == 2
-    assert import_payload.call_args.args[1]["activity"]["source_system"] == "fit_upload"
+    assert persist_fit_import.call_args.args[0]["activity"]["source_system"] == "fit_upload"
 
 
 def test_save_import_token_consumed_once():
     token = webapp._store_pending({"preview": {}, "activity": {"name": "upload.fit", "source_system": "fit_upload", "strava_id": None}, "streams": []})
 
-    mock_conn = MagicMock()
     with (
-        patch("webapp.get_connection", return_value=mock_conn),
-        patch("webapp.import_fit_payload", return_value=(10, 0)),
+        patch("webapp.persist_fit_import", return_value=(10, 0)),
     ):
         webapp._save_import(token)
 
@@ -129,7 +125,7 @@ def test_save_import_rejects_expired_token():
     expired = datetime.now(timezone.utc) - webapp._PENDING_TTL - webapp.timedelta(seconds=1)
     token = "expired-token"
     with webapp._PENDING_IMPORTS_LOCK:
-        webapp._PENDING_IMPORTS[token] = {"created_at": expired, "parsed": {"preview": {}, "activity": {"source_system": "fit_upload"}, "streams": []}}
+        webapp._PENDING_IMPORTS[token] = {"created_at": expired, "payload": {"preview": {}, "activity": {"source_system": "fit_upload"}, "streams": []}}
 
     with pytest.raises(KeyError):
         webapp._save_import(token)
@@ -189,4 +185,25 @@ def test_api_merge_run_parses_string_boolean_flags():
     options = run_merge.call_args.args[1]
     assert options.overwrite_existing_hr is False
     assert options.ignore_implausible_hr is False
+    send_json.assert_called_once_with(200, {"ok": True})
+
+
+def test_api_merge_run_passes_matching_strategy_option():
+    handler = webapp._Handler.__new__(webapp._Handler)
+    handler.path = "/api/tools/fit-hr-merge/run"
+    payload = b'{"import_token":"t","matching_strategy":"interpolate"}'
+    handler.headers = {"Content-Length": str(len(payload))}
+    handler.rfile = io.BytesIO(payload)
+    handler.wfile = io.BytesIO()
+    handler.command = "POST"
+    handler.request_version = "HTTP/1.1"
+
+    with (
+        patch.object(handler, "_json") as send_json,
+        patch("webapp._run_hr_merge", return_value={"ok": True}) as run_merge,
+    ):
+        handler.do_POST()
+
+    options = run_merge.call_args.args[1]
+    assert options.matching_strategy == "interpolate"
     send_json.assert_called_once_with(200, {"ok": True})

@@ -4,145 +4,68 @@ from __future__ import annotations
 
 import cgi
 import json
-import uuid
-from threading import RLock
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from db import get_connection
-from fit_import import FitImportError, parse_fit_bytes, import_fit_payload
-from hr_fit_merge import (
-    FitHrMergeError,
-    MergeOptions,
-    merge_fit_with_hr,
-    parse_apple_hr_payload,
-    parse_fit_records_for_merge,
-    render_merged_output_json,
-    render_merged_output_fit,
-)
+from fit_import import FitImportError
+from hr_fit_merge import FitHrMergeError, MergeOptions
+from hr_merge_service import parse_merge_options, preview_merge, run_merge
+from import_service import persist_fit_import, preview_fit_import
+from stores import ExpiringTokenStore
 
-_PENDING_IMPORTS: dict[str, dict] = {}
 _PENDING_TTL = timedelta(minutes=30)
-_PENDING_IMPORTS_LOCK = RLock()
-
-_MERGED_ARTIFACTS: dict[str, dict] = {}
 _MERGED_TTL = timedelta(minutes=30)
-_MERGED_LOCK = RLock()
+_PENDING_STORE = ExpiringTokenStore(ttl=_PENDING_TTL)
+_MERGED_STORE = ExpiringTokenStore(ttl=_MERGED_TTL)
+
+# Backwards-compatible aliases used by tests.
+_PENDING_IMPORTS = _PENDING_STORE.items
+_PENDING_IMPORTS_LOCK = _PENDING_STORE.lock
 
 
-def _store_merged_artifact(filename: str, content: bytes, report: dict) -> str:
-    with _MERGED_LOCK:
-        now = datetime.now(timezone.utc)
-        expired = [token for token, payload in _MERGED_ARTIFACTS.items() if now - payload["created_at"] > _MERGED_TTL]
-        for token in expired:
-            _MERGED_ARTIFACTS.pop(token, None)
-        token = str(uuid.uuid4())
-        _MERGED_ARTIFACTS[token] = {"created_at": now, "filename": filename, "content": content, "report": report}
-        return token
-
-
-def _load_merged_artifact(token: str) -> dict:
-    with _MERGED_LOCK:
-        item = _MERGED_ARTIFACTS.get(token)
-        if not item:
-            raise KeyError("Unknown artifact token")
-        now = datetime.now(timezone.utc)
-        if now - item["created_at"] > _MERGED_TTL:
-            _MERGED_ARTIFACTS.pop(token, None)
-            raise KeyError("Expired artifact token")
-        return item
-
-
-def _purge_pending() -> None:
-    with _PENDING_IMPORTS_LOCK:
-        now = datetime.now(timezone.utc)
-        expired = [token for token, payload in _PENDING_IMPORTS.items() if now - payload["created_at"] > _PENDING_TTL]
-        for token in expired:
-            _PENDING_IMPORTS.pop(token, None)
-
-
-def _store_pending(parsed: dict) -> str:
-    with _PENDING_IMPORTS_LOCK:
-        now = datetime.now(timezone.utc)
-        expired = [token for token, payload in _PENDING_IMPORTS.items() if now - payload["created_at"] > _PENDING_TTL]
-        for token in expired:
-            _PENDING_IMPORTS.pop(token, None)
-        token = str(uuid.uuid4())
-        _PENDING_IMPORTS[token] = {"created_at": now, "parsed": parsed}
-        return token
+def _store_pending(payload: dict) -> str:
+    return _PENDING_STORE.put(payload)
 
 
 def _load_pending(token: str, pop: bool = False) -> dict:
-    with _PENDING_IMPORTS_LOCK:
-        pending = _PENDING_IMPORTS.get(token)
-        if pending:
-            now = datetime.now(timezone.utc)
-            if now - pending["created_at"] > _PENDING_TTL:
-                _PENDING_IMPORTS.pop(token, None)
-                pending = None
-            elif pop:
-                pending = _PENDING_IMPORTS.pop(token, None)
-    if not pending:
-        raise KeyError("Unknown or expired import token")
-    return pending["parsed"]
+    try:
+        return _PENDING_STORE.get(token, pop=pop)
+    except KeyError as exc:
+        raise KeyError("Unknown or expired import token") from exc
+
+
+def _store_merged_artifact(filename: str, content: bytes, report: dict) -> str:
+    return _MERGED_STORE.put({"filename": filename, "content": content, "report": report})
+
+
+def _load_merged_artifact(token: str) -> dict:
+    try:
+        return _MERGED_STORE.get(token, pop=False)
+    except KeyError as exc:
+        raise KeyError("Unknown artifact token") from exc
 
 
 def _save_import(token: str) -> tuple[int, int]:
     parsed = _load_pending(token, pop=True)
-    conn = get_connection()
-    try:
-        return import_fit_payload(conn, parsed, run_fitness_recalc=True)
-    finally:
-        conn.close()
+    return persist_fit_import(parsed)
 
 
 def _handle_fit_preview(filename: str, content: bytes) -> dict:
-    if not filename:
-        raise FitImportError("Missing file")
-    if not filename.lower().endswith(".fit"):
-        raise FitImportError("Only .fit files are supported")
-    parsed = parse_fit_bytes(content, filename)
+    parsed = preview_fit_import(filename, content)
     token = _store_pending(parsed)
     return {"import_token": token, "preview": parsed["preview"]}
 
 
 def _handle_hr_merge_preview(fit_filename: str, fit_content: bytes, apple_content: bytes, apple_source_type: str) -> dict:
-    if not fit_filename.lower().endswith(".fit"):
-        raise FitHrMergeError("FIT input must end with .fit")
-    fit_payload = parse_fit_records_for_merge(fit_content)
-    apple_raw = parse_apple_hr_payload(apple_content, source_type=apple_source_type)
-
-    fit_start = fit_payload["summary"]["start_time"]
-    fit_end = fit_payload["summary"]["end_time"]
-    overlap_count = sum(1 for row in apple_raw if fit_start <= row.get("timestamp", "") <= fit_end)
-
-    token = _store_pending({
-        "fit_filename": fit_filename,
-        "fit_bytes": fit_content,
-        "fit_records": fit_payload["records"],
-        "apple_raw": apple_raw,
-    })
-
-    return {
-        "import_token": token,
-        "fit_summary": fit_payload["summary"],
-        "apple_summary": {
-            "point_count": len(apple_raw),
-            "first_timestamp": apple_raw[0]["timestamp"] if apple_raw else None,
-            "last_timestamp": apple_raw[-1]["timestamp"] if apple_raw else None,
-        },
-        "estimated_overlap_points": overlap_count,
-        "warnings": [] if overlap_count else ["Low overlap between Apple HR and FIT timeline; verify timezone/export range."],
-    }
+    merge_payload, response = preview_merge(fit_filename, fit_content, apple_content, apple_source_type)
+    token = _store_pending(merge_payload)
+    return {"import_token": token, **response}
 
 
 def _run_hr_merge(import_token: str, options: MergeOptions) -> dict:
     payload = _load_pending(import_token, pop=False)
-    merged_records, report = merge_fit_with_hr(payload["fit_records"], payload["apple_raw"], options)
-    output_name, content, report = render_merged_output_fit(
-        payload["fit_filename"], payload["fit_bytes"], merged_records, report
-    )
+    output_name, content, report = run_merge(payload, options)
     artifact_token = _store_merged_artifact(output_name, content, report)
     return {
         "artifact_token": artifact_token,
@@ -150,24 +73,6 @@ def _run_hr_merge(import_token: str, options: MergeOptions) -> dict:
         "report": report,
         "output_format": "fit",
     }
-
-
-
-
-def _parse_bool_flag(value, *, default: bool) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    if isinstance(value, str):
-        v = value.strip().lower()
-        if v in {"true", "1", "yes", "on"}:
-            return True
-        if v in {"false", "0", "no", "off"}:
-            return False
-    raise ValueError("Boolean flag must be true/false")
 
 def _render_upload_page() -> str:
     return """
@@ -387,13 +292,7 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(400, {"error": "JSON body must be an object"})
                 return
             try:
-                options = MergeOptions(
-                    tolerance_seconds=int(payload.get("tolerance_seconds", 2)),
-                    overwrite_existing_hr=_parse_bool_flag(payload.get("overwrite_existing_hr", False), default=False),
-                    ignore_implausible_hr=_parse_bool_flag(payload.get("ignore_implausible_hr", True), default=True),
-                    min_hr=int(payload.get("min_hr", 30)),
-                    max_hr=int(payload.get("max_hr", 240)),
-                )
+                options = parse_merge_options(payload)
                 result = _run_hr_merge(payload.get("import_token", ""), options)
             except KeyError:
                 self._json(404, {"error": "Unknown or expired import token"})

@@ -5,6 +5,8 @@ import sys
 import struct
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 sys.modules.setdefault("psycopg2", MagicMock())
 sys.modules.setdefault("psycopg2.extras", MagicMock())
 
@@ -35,6 +37,17 @@ def test_merge_with_overwrite_replaces_existing_hr():
 
     assert merged[0]["hr"] == 150
     assert report["hr_points_written"] == 1
+
+
+def test_merge_rejects_unknown_matching_strategy():
+    fit_records = [{"timestamp": "2026-04-11T07:01:05Z", "hr": None}]
+    apple = [{"timestamp": "2026-04-11T07:01:05Z", "hr": 150}]
+    with pytest.raises(hr_fit_merge.FitHrMergeError):
+        hr_fit_merge.merge_fit_with_hr(
+            fit_records,
+            apple,
+            hr_fit_merge.MergeOptions(matching_strategy="interpolate"),
+        )
 
 
 def test_parse_fit_records_for_merge_uses_utc_and_hr_optional():
