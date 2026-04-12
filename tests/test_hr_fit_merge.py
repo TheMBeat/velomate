@@ -79,7 +79,7 @@ def test_rewrite_fit_hr_values_patches_binary_record_hr():
     data = definition + data_msg
 
     header = bytes([12, 0x10, 0x00, 0x00]) + struct.pack("<I", len(data)) + b".FIT"
-    crc = struct.pack("<H", hr_fit_merge._fit_crc(data))
+    crc = struct.pack("<H", hr_fit_merge._fit_crc(header + data))
     fit_bytes = header + data + crc
 
     merged_records = [{"timestamp": "2026-04-11T07:01:05Z", "hr": 150}]
@@ -88,3 +88,39 @@ def test_rewrite_fit_hr_values_patches_binary_record_hr():
     assert patched == 1
     # final HR byte in the only data message should now be 150
     assert out_bytes[-3] == 150
+
+
+def test_compressed_record_uses_timestamp_from_non_record_message():
+    ts = hr_fit_merge._utc_iso_to_fit_seconds("2026-04-11T07:01:05Z")
+
+    # Local 0: global 18 (session-like), includes timestamp only
+    def_session = bytes([
+        0x40, 0x00, 0x00, 0x12, 0x00, 0x01,
+        0xFD, 0x04, 0x86,
+    ])
+    msg_session = bytes([0x00]) + struct.pack("<I", ts)
+
+    # Local 1: global 20 (record), includes heart_rate only; timestamp provided via compressed header
+    def_record = bytes([
+        0x41, 0x00, 0x00, 0x14, 0x00, 0x01,
+        0x03, 0x01, 0x02,
+    ])
+    # compressed header for local=1,time offset=1
+    msg_record_compressed = bytes([0xA1, 100])
+
+    data = def_session + msg_session + def_record + msg_record_compressed
+    header = bytes([12, 0x10, 0x00, 0x00]) + struct.pack("<I", len(data)) + b".FIT"
+    crc = struct.pack("<H", hr_fit_merge._fit_crc(header + data))
+    fit_bytes = header + data + crc
+
+    compressed_ts = (ts & ~0x1F) + 1
+    if compressed_ts < ts:
+        compressed_ts += 0x20
+    compressed_iso = (
+        hr_fit_merge.FIT_EPOCH + __import__("datetime").timedelta(seconds=compressed_ts)
+    ).isoformat().replace("+00:00", "Z")
+    merged_records = [{"timestamp": compressed_iso, "hr": 151}]
+    out_bytes, patched = hr_fit_merge.rewrite_fit_hr_values(fit_bytes, merged_records)
+
+    assert patched == 1
+    assert out_bytes[-3] == 151

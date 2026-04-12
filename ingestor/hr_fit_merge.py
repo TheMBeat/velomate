@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 import json
 from io import BytesIO
 import struct
@@ -177,6 +177,15 @@ def _extract_record_layout(defn: dict) -> tuple[int | None, int | None]:
     return ts_offset, hr_offset
 
 
+def _find_field_offset(defn: dict, field_num: int, expected_size: int | None = None) -> int | None:
+    cursor = 0
+    for f_num, f_size, _base_type in defn["fields"]:
+        if f_num == field_num and (expected_size is None or f_size == expected_size):
+            return cursor
+        cursor += f_size
+    return None
+
+
 def rewrite_fit_hr_values(original_fit: bytes, merged_records: list[dict]) -> tuple[bytes, int]:
     """Patch heart_rate bytes for record messages that already include HR field.
 
@@ -281,22 +290,25 @@ def rewrite_fit_hr_values(original_fit: bytes, merged_records: list[dict]) -> tu
         if msg_end > len(data):
             raise FitHrMergeError("Truncated data message")
 
-        if defn["global_msg_num"] == 20:
-            ts_offset, hr_offset = _extract_record_layout(defn)
-            if ts_offset is not None:
-                ts_bytes = bytes(data[msg_start + ts_offset: msg_start + ts_offset + 4])
-                ts = _decode_timestamp(ts_bytes, defn["little_endian"])
-                last_timestamp = ts
-                if hr_offset is not None and ts in target_by_fit_ts:
-                    new_hr = max(0, min(255, target_by_fit_ts[ts]))
-                    data[msg_start + hr_offset] = new_hr
-                    patched += 1
+        ts_offset_any = _find_field_offset(defn, field_num=253, expected_size=4)
+        ts = None
+        if ts_offset_any is not None:
+            ts_bytes = bytes(data[msg_start + ts_offset_any: msg_start + ts_offset_any + 4])
+            ts = _decode_timestamp(ts_bytes, defn["little_endian"])
+            last_timestamp = ts
+
+        if defn["global_msg_num"] == 20 and ts is not None:
+            _ts_offset, hr_offset = _extract_record_layout(defn)
+            if hr_offset is not None and ts in target_by_fit_ts:
+                new_hr = max(0, min(255, target_by_fit_ts[ts]))
+                data[msg_start + hr_offset] = new_hr
+                patched += 1
 
         pos = msg_end
 
     header = bytearray(original_fit[:header_size])
     out = bytes(header) + bytes(data)
-    crc = _fit_crc(out[header_size:])
+    crc = _fit_crc(out)
     out += struct.pack("<H", crc)
     return out, patched
 
