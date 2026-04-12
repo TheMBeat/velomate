@@ -102,17 +102,13 @@ def test_persistence_and_source_tagging():
     mock_conn = MagicMock()
     with (
         patch("webapp.get_connection", return_value=mock_conn),
-        patch("webapp.upsert_activity", return_value=(123, False)) as upsert_activity,
-        patch("webapp.upsert_streams") as upsert_streams,
-        patch("webapp.recalculate_fitness") as recalc,
+        patch("webapp.import_fit_payload", return_value=(123, 2)) as import_payload,
     ):
         activity_id, sample_count = webapp._save_import(token)
 
     assert activity_id == 123
     assert sample_count == 2
-    assert upsert_activity.call_args.args[1]["source_system"] == "fit_upload"
-    upsert_streams.assert_called_once()
-    recalc.assert_called_once()
+    assert import_payload.call_args.args[1]["activity"]["source_system"] == "fit_upload"
 
 
 def test_save_import_token_consumed_once():
@@ -121,9 +117,7 @@ def test_save_import_token_consumed_once():
     mock_conn = MagicMock()
     with (
         patch("webapp.get_connection", return_value=mock_conn),
-        patch("webapp.upsert_activity", return_value=(10, False)),
-        patch("webapp.upsert_streams"),
-        patch("webapp.recalculate_fitness"),
+        patch("webapp.import_fit_payload", return_value=(10, 0)),
     ):
         webapp._save_import(token)
 
