@@ -149,3 +149,45 @@ def test_rewrite_fit_hr_values_uses_per_record_hr_for_duplicate_timestamps():
     payload = out_bytes[12:-2]
     assert payload[len(definition) + 1 + 4] == 111
     assert payload[len(definition) + (1 + 4 + 1) + 1 + 4] == 112
+
+
+def test_rewrite_fit_hr_values_skips_non_writable_record_in_fifo_order():
+    ts = hr_fit_merge._utc_iso_to_fit_seconds("2026-04-11T07:01:05Z")
+
+    # local msg 0: record with timestamp only (no HR field, not writable)
+    definition_no_hr = bytes([
+        0x40,  # definition, local msg 0
+        0x00,
+        0x00,
+        0x14, 0x00,
+        0x01,
+        0xFD, 0x04, 0x86,
+    ])
+    # local msg 1: record with timestamp + HR field (writable)
+    definition_with_hr = bytes([
+        0x41,  # definition, local msg 1
+        0x00,
+        0x00,
+        0x14, 0x00,
+        0x02,
+        0xFD, 0x04, 0x86,
+        0x03, 0x01, 0x02,
+    ])
+    # first record (no HR byte), second record (has HR byte)
+    msg_no_hr = bytes([0x00]) + struct.pack("<I", ts)
+    msg_with_hr = bytes([0x01]) + struct.pack("<I", ts) + bytes([100])
+    data = definition_no_hr + definition_with_hr + msg_no_hr + msg_with_hr
+
+    header = bytes([12, 0x10, 0x00, 0x00]) + struct.pack("<I", len(data)) + b".FIT"
+    crc = struct.pack("<H", hr_fit_merge._fit_crc(data))
+    fit_bytes = header + data + crc
+
+    merged_records = [
+        {"timestamp": "2026-04-11T07:01:05Z", "hr": 111},  # maps to non-writable record
+        {"timestamp": "2026-04-11T07:01:05Z", "hr": 112},  # should patch writable record
+    ]
+    out_bytes, patched = hr_fit_merge.rewrite_fit_hr_values(fit_bytes, merged_records)
+
+    assert patched == 1
+    payload = out_bytes[12:-2]
+    assert payload[-1] == 112

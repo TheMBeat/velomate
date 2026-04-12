@@ -197,12 +197,11 @@ def rewrite_fit_hr_values(original_fit: bytes, merged_records: list[dict]) -> tu
 
     data = bytearray(original_fit[data_start:data_end])
 
-    target_by_fit_ts: dict[int, deque[int]] = defaultdict(deque)
+    target_by_fit_ts: dict[int, deque[int | None]] = defaultdict(deque)
     for rec in merged_records:
-        if rec.get("hr") is None:
-            continue
         fit_ts = _utc_iso_to_fit_seconds(rec["timestamp"])
-        target_by_fit_ts[fit_ts].append(int(rec["hr"]))
+        hr = rec.get("hr")
+        target_by_fit_ts[fit_ts].append(None if hr is None else int(hr))
 
     definitions: dict[int, dict] = {}
     pos = 0
@@ -230,8 +229,9 @@ def rewrite_fit_hr_values(original_fit: bytes, merged_records: list[dict]) -> tu
             pos += msg_len
             if defn["global_msg_num"] == 20:
                 _, hr_offset = _extract_record_layout(defn)
-                if hr_offset is not None and target_by_fit_ts.get(ts):
-                    new_hr = max(0, min(255, target_by_fit_ts[ts].popleft()))
+                queued_hr = target_by_fit_ts[ts].popleft() if target_by_fit_ts.get(ts) else None
+                if hr_offset is not None and queued_hr is not None:
+                    new_hr = max(0, min(255, queued_hr))
                     data[msg_start + hr_offset] = new_hr
                     patched += 1
             continue
@@ -297,8 +297,9 @@ def rewrite_fit_hr_values(original_fit: bytes, merged_records: list[dict]) -> tu
                 ts_bytes = bytes(data[msg_start + ts_offset: msg_start + ts_offset + 4])
                 ts = _decode_timestamp(ts_bytes, defn["little_endian"])
                 last_timestamp = ts
-                if hr_offset is not None and target_by_fit_ts.get(ts):
-                    new_hr = max(0, min(255, target_by_fit_ts[ts].popleft()))
+                queued_hr = target_by_fit_ts[ts].popleft() if target_by_fit_ts.get(ts) else None
+                if hr_offset is not None and queued_hr is not None:
+                    new_hr = max(0, min(255, queued_hr))
                     data[msg_start + hr_offset] = new_hr
                     patched += 1
 
