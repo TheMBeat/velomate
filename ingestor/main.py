@@ -12,6 +12,7 @@ from db import get_connection, create_schema, get_sync_state, set_sync_state
 from strava import sync_activities, backfill, reclassify_activities
 from fitness import recalculate_fitness
 from webapp import run_server
+from fit_import import parse_fit_bytes, import_fit_payload
 
 
 def _get_healthy_conn():
@@ -403,7 +404,25 @@ def run():
     host = os.environ.get("WEB_HOST", "0.0.0.0")
     port = int(os.environ.get("WEB_PORT", "8080"))
     print(f"[main] FIT import UI available at http://{host}:{port}/imports/fit")
-    run_server(host, port)
+    web_debug = os.environ.get("WEB_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
+    run_server(host, port, debug=web_debug)
+
+
+def run_import_fit(file_path: str) -> int:
+    """Import a FIT file from CLI using the same service as web imports."""
+    with open(file_path, "rb") as fh:
+        payload = fh.read()
+    parsed = parse_fit_bytes(payload, file_path)
+
+    conn = get_connection()
+    try:
+        create_schema(conn)
+        activity_id, sample_count = import_fit_payload(conn, parsed, run_fitness_recalc=True)
+    finally:
+        conn.close()
+
+    print(f"[import-fit] Imported activity {activity_id} ({sample_count} samples) from {file_path}")
+    return activity_id
 
 
 def run_reclassify():
@@ -420,5 +439,7 @@ def run_reclassify():
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "reclassify":
         run_reclassify()
+    elif len(sys.argv) > 2 and sys.argv[1] == "import-fit":
+        run_import_fit(sys.argv[2])
     else:
         run()

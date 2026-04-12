@@ -195,6 +195,9 @@ If `STRAVA_CLIENT_ID`, `STRAVA_CLIENT_SECRET`, and `STRAVA_REFRESH_TOKEN` are le
 - Web UI: `http://localhost:8080/imports/fit`
 - REST preview: `POST /api/imports/fit` (`multipart/form-data`, field name `file`)
 - REST confirm: `POST /api/imports/fit/confirm` with JSON body `{"import_token":"..."}`
+- CLI import: `python ingestor/main.py import-fit /path/to/activity.fit`
+
+Web debug mode is **disabled by default**. Enable explicitly with `WEB_DEBUG=1`.
 
 Import preview includes start/end time, duration, distance, sample count, and availability flags for GPS/speed/cadence/power/HR. Confirming import writes the activity and streams to PostgreSQL and triggers metric recalculation using the existing pipeline.
 
@@ -202,6 +205,17 @@ Current MVP limitations:
 - Uploads are processed in-process (no background queue).
 - Pending import previews expire after 30 minutes.
 - FIT files are assumed to be cycling activities.
+
+
+### Apple HR + FIT merger tool (MVP prep)
+
+A lightweight web utility is available at `http://localhost:8080/tools/fit-hr-merge` to:
+- upload one FIT file + one Apple HR export file (JSON/CSV/auto-detect)
+- preview timeline overlap and dataset summaries
+- run nearest-neighbor HR mapping with tolerance + overwrite controls
+- download merged output artifact + coverage report
+
+Merge output is generated as a new FIT file (`*_merged_hr.fit`) plus merge stats in the API response/UI preview.
 
 ### 4. Set up the CLI
 

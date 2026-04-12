@@ -140,3 +140,16 @@ def parse_fit_bytes(file_bytes: bytes, filename: str = "upload.fit") -> dict:
     }
 
     return {"preview": preview, "activity": activity, "streams": streams}
+
+
+def import_fit_payload(conn, parsed: dict, *, run_fitness_recalc: bool = True) -> tuple[int, int]:
+    """Persist a parsed FIT payload and return (activity_id, sample_count)."""
+    from db import upsert_activity, upsert_streams
+    from fitness import recalculate_fitness
+
+    activity_id, streams_preserved = upsert_activity(conn, parsed["activity"])
+    if not streams_preserved:
+        upsert_streams(conn, activity_id, parsed["streams"])
+    if run_fitness_recalc:
+        recalculate_fitness(conn)
+    return activity_id, len(parsed["streams"])

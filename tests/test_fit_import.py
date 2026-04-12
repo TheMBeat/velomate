@@ -102,17 +102,13 @@ def test_persistence_and_source_tagging():
     mock_conn = MagicMock()
     with (
         patch("webapp.get_connection", return_value=mock_conn),
-        patch("webapp.upsert_activity", return_value=(123, False)) as upsert_activity,
-        patch("webapp.upsert_streams") as upsert_streams,
-        patch("webapp.recalculate_fitness") as recalc,
+        patch("webapp.import_fit_payload", return_value=(123, 2)) as import_payload,
     ):
         activity_id, sample_count = webapp._save_import(token)
 
     assert activity_id == 123
     assert sample_count == 2
-    assert upsert_activity.call_args.args[1]["source_system"] == "fit_upload"
-    upsert_streams.assert_called_once()
-    recalc.assert_called_once()
+    assert import_payload.call_args.args[1]["activity"]["source_system"] == "fit_upload"
 
 
 def test_save_import_token_consumed_once():
@@ -121,9 +117,7 @@ def test_save_import_token_consumed_once():
     mock_conn = MagicMock()
     with (
         patch("webapp.get_connection", return_value=mock_conn),
-        patch("webapp.upsert_activity", return_value=(10, False)),
-        patch("webapp.upsert_streams"),
-        patch("webapp.recalculate_fitness"),
+        patch("webapp.import_fit_payload", return_value=(10, 0)),
     ):
         webapp._save_import(token)
 
@@ -158,3 +152,41 @@ def test_api_confirm_invalid_json_returns_400():
         handler.do_POST()
 
     send_json.assert_called_once_with(400, {"error": "Invalid JSON body"})
+
+
+def test_api_merge_run_rejects_non_object_json_body():
+    handler = webapp._Handler.__new__(webapp._Handler)
+    handler.path = "/api/tools/fit-hr-merge/run"
+    payload = b"[]"
+    handler.headers = {"Content-Length": str(len(payload))}
+    handler.rfile = io.BytesIO(payload)
+    handler.wfile = io.BytesIO()
+    handler.command = "POST"
+    handler.request_version = "HTTP/1.1"
+
+    with patch.object(handler, "_json") as send_json:
+        handler.do_POST()
+
+    send_json.assert_called_once_with(400, {"error": "JSON body must be an object"})
+
+
+def test_api_merge_run_parses_string_boolean_flags():
+    handler = webapp._Handler.__new__(webapp._Handler)
+    handler.path = "/api/tools/fit-hr-merge/run"
+    payload = b'{"import_token":"t","overwrite_existing_hr":"false","ignore_implausible_hr":"false"}'
+    handler.headers = {"Content-Length": str(len(payload))}
+    handler.rfile = io.BytesIO(payload)
+    handler.wfile = io.BytesIO()
+    handler.command = "POST"
+    handler.request_version = "HTTP/1.1"
+
+    with (
+        patch.object(handler, "_json") as send_json,
+        patch("webapp._run_hr_merge", return_value={"ok": True}) as run_merge,
+    ):
+        handler.do_POST()
+
+    options = run_merge.call_args.args[1]
+    assert options.overwrite_existing_hr is False
+    assert options.ignore_implausible_hr is False
+    send_json.assert_called_once_with(200, {"ok": True})
