@@ -30,6 +30,32 @@ def test_merge_without_overwrite_preserves_existing_hr():
     assert report["hr_points_written"] == 1
 
 
+def test_parse_apple_hr_payload_details_supports_data_workouts_structure():
+    payload = b"""{
+      "data": {
+        "selectedWorkoutId": "wk2",
+        "workouts": [
+          {"id": "wk1", "heartRateData": [{"date":"2026-04-11 09:00:00 +0200","Avg":111,"units":"bpm"}]},
+          {"id": "wk2", "heartRateData": [{"date":"2026-04-11 09:01:06 +0200","Avg":126,"units":"bpm"}]}
+        ]
+      }
+    }"""
+    parsed = hr_fit_merge.parse_apple_hr_payload_details(payload, source_type="json")
+    assert parsed["samples"] == [{"timestamp": "2026-04-11T07:01:06Z", "hr": 126}]
+    assert parsed["debug"]["workouts_found"] == 2
+    assert parsed["debug"]["selected_workout_has_heart_rate_data"] is True
+    assert parsed["debug"]["extracted_hr_points"] == 1
+
+
+def test_parse_apple_hr_payload_details_csv_includes_debug_envelope():
+    payload = b"timestamp,hr\n2026-04-11T07:01:06Z,126\n"
+    parsed = hr_fit_merge.parse_apple_hr_payload_details(payload, source_type="csv")
+    assert parsed["source_type"] == "csv"
+    assert parsed["samples"] == [{"timestamp": "2026-04-11T07:01:06Z", "hr": 126}]
+    assert parsed["debug"]["parser_mode"] == "csv"
+    assert parsed["debug"]["extracted_hr_points"] == 1
+
+
 def test_merge_with_overwrite_replaces_existing_hr():
     fit_records = [{"timestamp": "2026-04-11T07:01:05Z", "hr": 140}]
     apple = [{"timestamp": "2026-04-11T07:01:05Z", "hr": 150}]

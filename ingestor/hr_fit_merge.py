@@ -9,7 +9,7 @@ import json
 from io import BytesIO
 import struct
 
-from apple_hr import parse_apple_hr_csv, parse_apple_hr_json, normalize_hr_series
+from apple_hr import AppleHrParseError, normalize_hr_series, parse_apple_hr_text_details
 from fit_import import FitImportError
 from hr_matching import MATCHING_STRATEGIES
 from fitparse import FitFile
@@ -77,17 +77,15 @@ def parse_fit_records_for_merge(file_bytes: bytes) -> dict:
 
 
 def parse_apple_hr_payload(content: bytes, source_type: str = "auto") -> list[dict]:
-    text = content.decode("utf-8", errors="replace")
-    mode = (source_type or "auto").lower()
+    return parse_apple_hr_payload_details(content, source_type=source_type)["samples"]
 
-    if mode == "json":
-        return parse_apple_hr_json(text)
-    if mode == "csv":
-        return parse_apple_hr_csv(text)
-    if mode == "auto":
-        stripped = text.lstrip()
-        return parse_apple_hr_json(text) if stripped.startswith(("{", "[")) else parse_apple_hr_csv(text)
-    raise FitHrMergeError("Unsupported Apple source type")
+
+def parse_apple_hr_payload_details(content: bytes, source_type: str = "auto") -> dict:
+    text = content.decode("utf-8", errors="replace")
+    try:
+        return parse_apple_hr_text_details(text, source_type=source_type)
+    except AppleHrParseError as exc:
+        raise FitHrMergeError(str(exc)) from exc
 
 
 def merge_fit_with_hr(fit_records: list[dict], hr_series: list[dict], options: MergeOptions) -> tuple[list[dict], dict]:
