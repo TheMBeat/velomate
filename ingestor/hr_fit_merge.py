@@ -9,6 +9,7 @@ import json
 from io import BytesIO
 import struct
 
+from apple_hr import parse_apple_hr_csv, parse_apple_hr_json_with_debug, normalize_hr_series
 from apple_hr import AppleHrParseError, normalize_hr_series, parse_apple_hr_text_details
 from fit_import import FitImportError
 from hr_matching import MATCHING_STRATEGIES
