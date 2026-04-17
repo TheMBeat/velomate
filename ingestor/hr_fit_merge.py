@@ -9,7 +9,7 @@ import json
 from io import BytesIO
 import struct
 
-from apple_hr import parse_apple_hr_csv, parse_apple_hr_json_with_debug, normalize_hr_series
+from apple_hr import AppleHrParseError, normalize_hr_series, parse_apple_hr_text_details
 from fit_import import FitImportError
 from hr_matching import MATCHING_STRATEGIES
 from fitparse import FitFile
@@ -82,46 +82,10 @@ def parse_apple_hr_payload(content: bytes, source_type: str = "auto") -> list[di
 
 def parse_apple_hr_payload_details(content: bytes, source_type: str = "auto") -> dict:
     text = content.decode("utf-8", errors="replace")
-    mode = (source_type or "auto").lower()
-
-    if mode == "json":
-        parsed = parse_apple_hr_json_with_debug(text)
-        parsed["source_type"] = "json"
-        return parsed
-    if mode == "csv":
-        samples = parse_apple_hr_csv(text)
-        return {
-            "samples": samples,
-            "source_type": "csv",
-            "debug": {
-                "parser_mode": "csv",
-                "workouts_found": 0,
-                "selected_workout_index": None,
-                "selected_workout_has_heart_rate_data": False,
-                "selected_workout_heart_rate_point_count": 0,
-                "extracted_hr_points": len(samples),
-            },
-        }
-    if mode == "auto":
-        stripped = text.lstrip()
-        if stripped.startswith(("{", "[")):
-            parsed = parse_apple_hr_json_with_debug(text)
-            parsed["source_type"] = "json"
-            return parsed
-        samples = parse_apple_hr_csv(text)
-        return {
-            "samples": samples,
-            "source_type": "csv",
-            "debug": {
-                "parser_mode": "csv",
-                "workouts_found": 0,
-                "selected_workout_index": None,
-                "selected_workout_has_heart_rate_data": False,
-                "selected_workout_heart_rate_point_count": 0,
-                "extracted_hr_points": len(samples),
-            },
-        }
-    raise FitHrMergeError("Unsupported Apple source type")
+    try:
+        return parse_apple_hr_text_details(text, source_type=source_type)
+    except AppleHrParseError as exc:
+        raise FitHrMergeError(str(exc)) from exc
 
 
 def merge_fit_with_hr(fit_records: list[dict], hr_series: list[dict], options: MergeOptions) -> tuple[list[dict], dict]:

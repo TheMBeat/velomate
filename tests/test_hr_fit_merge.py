@@ -47,6 +47,15 @@ def test_parse_apple_hr_payload_details_supports_data_workouts_structure():
     assert parsed["debug"]["extracted_hr_points"] == 1
 
 
+def test_parse_apple_hr_payload_details_csv_includes_debug_envelope():
+    payload = b"timestamp,hr\n2026-04-11T07:01:06Z,126\n"
+    parsed = hr_fit_merge.parse_apple_hr_payload_details(payload, source_type="csv")
+    assert parsed["source_type"] == "csv"
+    assert parsed["samples"] == [{"timestamp": "2026-04-11T07:01:06Z", "hr": 126}]
+    assert parsed["debug"]["parser_mode"] == "csv"
+    assert parsed["debug"]["extracted_hr_points"] == 1
+
+
 def test_merge_with_overwrite_replaces_existing_hr():
     fit_records = [{"timestamp": "2026-04-11T07:01:05Z", "hr": 140}]
     apple = [{"timestamp": "2026-04-11T07:01:05Z", "hr": 150}]

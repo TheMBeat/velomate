@@ -178,6 +178,28 @@ def test_parse_workout_wrapped_under_samples_dict():
     assert parsed["debug"]["selected_workout_index"] == 1
 
 
+def test_malformed_selected_workout_id_treated_as_non_matching():
+    payload = """{
+      "data": {
+        "selectedWorkoutId": ["bad-selector"],
+        "workouts": [
+          {"id": "w1", "heartRateData": []},
+          {"id": "w2", "heartRateData": [{"date":"2026-04-11 09:01:06 +0200","Avg":126,"units":"bpm"}]}
+        ]
+      }
+    }"""
+    parsed = apple_hr.parse_apple_hr_json_with_debug(payload)
+    assert parsed["samples"] == [{"timestamp": "2026-04-11T07:01:06Z", "hr": 126}]
+    assert parsed["debug"]["selected_workout_index"] == 1
+
+
+def test_parse_apple_hr_json_compat_wrapper_matches_debug_samples():
+    payload = '{"heartRateData":[{"date":"2026-04-11 09:01:06 +0200","Avg":126,"units":"bpm"}]}'
+    legacy = apple_hr.parse_apple_hr_json(payload)
+    detailed = apple_hr.parse_apple_hr_json_with_debug(payload)
+    assert legacy == detailed["samples"]
+
+
 def test_parse_csv_and_normalize_bounds_and_duplicates():
     payload = "timestamp,hr\n2026-04-10T12:00:00Z,150\n2026-04-10T12:00:00Z,151\n2026-04-10T12:00:01Z,20\n"
     rows = apple_hr.parse_apple_hr_csv(payload)

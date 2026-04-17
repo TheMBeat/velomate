@@ -10,10 +10,30 @@ import csv
 import json
 from datetime import datetime, timezone
 from io import StringIO
+from typing import Any
 
 
 class AppleHrParseError(ValueError):
     """Raised when Apple HR export payload cannot be parsed."""
+
+
+WORKOUT_WRAPPER_KEYS = ("samples", "items", "heart_rate", "heartRateData")
+DIRECT_LIST_WRAPPER_KEYS = ("heartRateData", "heart_rate", "samples", "data", "items")
+WORKOUT_ID_KEYS = ("id", "uuid", "workoutId", "workoutUUID")
+WORKOUT_SELECTOR_KEYS = ("selectedWorkoutId", "selectedWorkoutUUID", "workoutId", "workoutUUID")
+
+
+def _empty_debug(parser_mode: str = "generic") -> dict[str, Any]:
+    return {
+        "parser_mode": parser_mode,
+        "workouts_found": 0,
+        "selected_workout_index": None,
+        "selected_workout_has_heart_rate_data": False,
+        "selected_workout_heart_rate_point_count": 0,
+        "selected_workout_parseable_point_count": 0,
+        "fallback_workout_index": None,
+        "extracted_hr_points": 0,
+    }
 
 
 def _parse_timestamp(raw: str) -> datetime:
@@ -69,45 +89,54 @@ def _sample_from_obj(obj: dict) -> dict | None:
     }
 
 
-def _select_workout_index(workouts: list[dict], data_wrapper: dict) -> tuple[int | None, bool]:
+def _parse_samples(candidates: list[Any]) -> list[dict]:
+    samples: list[dict] = []
+    for obj in candidates:
+        try:
+            sample = _sample_from_obj(obj)
+        except AppleHrParseError:
+            continue
+        if sample is not None:
+            samples.append(sample)
+    return samples
+
+
+def _parseable_hr_point_count(hr_data: Any) -> int:
+    if not isinstance(hr_data, list):
+        return 0
+    return len(_parse_samples(hr_data))
+
+
+def _find_matching_workout_index(workouts: list[dict], wrapper: dict) -> tuple[int | None, bool]:
     if not workouts:
         return None, False
 
-    selected_index = data_wrapper.get("selectedWorkoutIndex")
-    if isinstance(selected_index, int) and 0 <= selected_index < len(workouts):
-        return selected_index, True
+    selected_index = wrapper.get("selectedWorkoutIndex")
+    if isinstance(selected_index, int) and not isinstance(selected_index, bool):
+        if 0 <= selected_index < len(workouts):
+            return selected_index, True
+        return None, False
 
-    selected_workout_id = (
-        data_wrapper.get("selectedWorkoutId")
-        or data_wrapper.get("selectedWorkoutUUID")
-        or data_wrapper.get("workoutId")
-        or data_wrapper.get("workoutUUID")
-    )
-    if selected_workout_id is not None:
+    selected_workout_id: Any = None
+    selected_specified = False
+    for key in WORKOUT_SELECTOR_KEYS:
+        if key in wrapper:
+            selected_workout_id = wrapper.get(key)
+            selected_specified = True
+            break
+
+    if selected_specified:
+        if isinstance(selected_workout_id, (dict, list, set, tuple)):
+            return None, False
         for idx, workout in enumerate(workouts):
             if not isinstance(workout, dict):
                 continue
-            if (
-                selected_workout_id == workout.get("id")
-                or selected_workout_id == workout.get("uuid")
-                or selected_workout_id == workout.get("workoutId")
-                or selected_workout_id == workout.get("workoutUUID")
-            ):
-                return idx, True
+            for workout_key in WORKOUT_ID_KEYS:
+                if selected_workout_id == workout.get(workout_key):
+                    return idx, True
+        return None, False
+
     return None, False
-
-
-def _parseable_hr_point_count(hr_data) -> int:
-    if not isinstance(hr_data, list):
-        return 0
-    count = 0
-    for item in hr_data:
-        try:
-            if _sample_from_obj(item) is not None:
-                count += 1
-        except AppleHrParseError:
-            continue
-    return count
 
 
 def _first_workout_with_points(workouts: list[dict], skip_index: int | None = None) -> int | None:
@@ -116,99 +145,91 @@ def _first_workout_with_points(workouts: list[dict], skip_index: int | None = No
             continue
         if not isinstance(workout, dict):
             continue
-        hr_data = workout.get("heartRateData")
-        if _parseable_hr_point_count(hr_data) > 0:
+        if _parseable_hr_point_count(workout.get("heartRateData")) > 0:
             return idx
     return None
 
 
-def _candidate_workout_hr_data(
-    wrapper: dict, debug: dict, parser_mode: str
-) -> tuple[list, dict] | None:
+def _discover_workout_candidates(wrapper: Any, parser_mode: str) -> tuple[list, dict] | None:
+    if not isinstance(wrapper, dict):
+        return None
+
     workouts_raw = wrapper.get("workouts")
     if not isinstance(workouts_raw, list):
         return None
 
     workouts = [w for w in workouts_raw if isinstance(w, dict)]
-    debug["parser_mode"] = parser_mode
+    debug = _empty_debug(parser_mode)
     debug["workouts_found"] = len(workouts)
-    selected_idx, selected_explicit = _select_workout_index(workouts, wrapper)
+
+    selected_idx, selected_explicit = _find_matching_workout_index(workouts, wrapper)
     debug["selected_workout_index"] = selected_idx
 
     if selected_idx is not None:
         hr_data = workouts[selected_idx].get("heartRateData")
         parseable_count = _parseable_hr_point_count(hr_data)
-        has_hr = parseable_count > 0
-        debug["selected_workout_has_heart_rate_data"] = has_hr
         debug["selected_workout_heart_rate_point_count"] = len(hr_data) if isinstance(hr_data, list) else 0
         debug["selected_workout_parseable_point_count"] = parseable_count
-        if has_hr:
+        debug["selected_workout_has_heart_rate_data"] = parseable_count > 0
+        if parseable_count > 0:
             return hr_data, debug
 
-        # Explicitly selected workout may be empty/corrupt. Fall back to any
-        # sibling workout that actually contains HR samples.
         fallback_idx = _first_workout_with_points(workouts, skip_index=selected_idx)
-        if fallback_idx is not None and fallback_idx != selected_idx:
+        if fallback_idx is not None:
             debug["fallback_workout_index"] = fallback_idx
             return workouts[fallback_idx]["heartRateData"], debug
 
     if not selected_explicit:
         fallback_idx = _first_workout_with_points(workouts)
         if fallback_idx is not None:
+            hr_data = workouts[fallback_idx].get("heartRateData")
             debug["selected_workout_index"] = fallback_idx
             debug["selected_workout_has_heart_rate_data"] = True
-            hr_data = workouts[fallback_idx].get("heartRateData")
             debug["selected_workout_heart_rate_point_count"] = len(hr_data) if isinstance(hr_data, list) else 0
+            debug["selected_workout_parseable_point_count"] = _parseable_hr_point_count(hr_data)
             return hr_data, debug
 
     return [], debug
 
 
-def _iter_json_candidates(payload) -> tuple[list, dict]:
-    debug = {
-        "parser_mode": "generic",
-        "workouts_found": 0,
-        "selected_workout_index": None,
-        "selected_workout_has_heart_rate_data": False,
-        "selected_workout_heart_rate_point_count": 0,
-    }
-
+def _iter_json_candidates(payload: Any) -> tuple[list, dict]:
     if isinstance(payload, list):
-        debug["parser_mode"] = "json_list"
-        return payload, debug
-    if isinstance(payload, dict):
-        # Handle top-level single sample object directly.
-        direct = _sample_from_obj(payload)
-        if direct is not None:
-            debug["parser_mode"] = "single_sample_object"
-            return [payload], debug
+        return payload, _empty_debug("json_list")
 
-        # Explicit Auto Health Export support: data.workouts[].heartRateData[]
-        data_wrapper = payload.get("data")
-        if isinstance(data_wrapper, dict):
-            workout_candidates = _candidate_workout_hr_data(
-                data_wrapper,
-                debug,
-                parser_mode="auto_health_export_data_workouts",
-            )
-            if workout_candidates is not None and workout_candidates[0]:
-                return workout_candidates
+    if not isinstance(payload, dict):
+        return [], _empty_debug()
 
-        # Common wrappers.
-        for key in ("heartRateData", "heart_rate", "samples", "data", "items"):
-            value = payload.get(key)
-            if isinstance(value, list):
-                debug["parser_mode"] = f"wrapper_list:{key}"
-                return value, debug
-            if isinstance(value, dict):
-                workout_candidates = _candidate_workout_hr_data(
-                    value,
-                    debug,
-                    parser_mode=f"wrapper_dict_workouts:{key}",
-                )
-                if workout_candidates is not None and workout_candidates[0]:
-                    return workout_candidates
-    return [], debug
+    direct = _sample_from_obj(payload)
+    if direct is not None:
+        return [payload], _empty_debug("single_sample_object")
+
+    result = _discover_workout_candidates(payload.get("data"), parser_mode="auto_health_export_data_workouts")
+    if result is not None and result[0]:
+        return result
+
+    for key in WORKOUT_WRAPPER_KEYS:
+        wrapper = payload.get(key)
+        result = _discover_workout_candidates(wrapper, parser_mode=f"wrapper_dict_workouts:{key}")
+        if result is not None and result[0]:
+            return result
+    for key in DIRECT_LIST_WRAPPER_KEYS:
+        value = payload.get(key)
+        if isinstance(value, list):
+            return value, _empty_debug(parser_mode=f"wrapper_list:{key}")
+
+    return [], _empty_debug()
+
+
+def _parse_json_payload_with_debug(text: str) -> tuple[list[dict], dict]:
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise AppleHrParseError("Invalid JSON payload") from exc
+
+    candidates, debug = _iter_json_candidates(payload)
+    samples = _parse_samples(candidates)
+    debug["extracted_hr_points"] = len(samples)
+    return samples, debug
 
 
 def parse_apple_hr_json(text: str) -> list[dict]:
@@ -216,39 +237,35 @@ def parse_apple_hr_json(text: str) -> list[dict]:
 
 
 def parse_apple_hr_json_with_debug(text: str) -> dict:
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise AppleHrParseError("Invalid JSON payload") from exc
-
-    candidates, debug = _iter_json_candidates(payload)
-    out: list[dict] = []
-    for obj in candidates:
-        try:
-            sample = _sample_from_obj(obj)
-        except AppleHrParseError:
-            continue
-        if sample is not None:
-            out.append(sample)
-
-    debug["extracted_hr_points"] = len(out)
+    samples, debug = _parse_json_payload_with_debug(text)
     print(
         "[apple_hr] JSON parse debug: "
         f"mode={debug['parser_mode']}, workouts_found={debug['workouts_found']}, "
         f"selected_has_heartRateData={debug['selected_workout_has_heart_rate_data']}, "
         f"extracted_hr_points={debug['extracted_hr_points']}"
     )
-    return {"samples": out, "debug": debug}
+    return {"samples": samples, "debug": debug}
 
 
 def parse_apple_hr_csv(text: str) -> list[dict]:
     reader = csv.DictReader(StringIO(text))
-    out: list[dict] = []
-    for row in reader:
-        sample = _sample_from_obj(row)
-        if sample is not None:
-            out.append(sample)
-    return out
+    return _parse_samples(list(reader))
+
+
+def parse_apple_hr_text_details(text: str, source_type: str = "auto") -> dict:
+    mode = (source_type or "auto").lower()
+    if mode == "json":
+        parsed = parse_apple_hr_json_with_debug(text)
+        parsed["source_type"] = "json"
+        return parsed
+    if mode == "csv":
+        samples = parse_apple_hr_csv(text)
+        return {"samples": samples, "source_type": "csv", "debug": _empty_debug("csv") | {"extracted_hr_points": len(samples)}}
+    if mode == "auto":
+        stripped = text.lstrip()
+        inferred_mode = "json" if stripped.startswith(("{", "[")) else "csv"
+        return parse_apple_hr_text_details(text, source_type=inferred_mode)
+    raise AppleHrParseError("Unsupported Apple source type")
 
 
 def normalize_hr_series(series: list[dict], min_hr: int = 30, max_hr: int = 240) -> list[dict]:
