@@ -118,6 +118,36 @@ def test_parse_auto_health_export_falls_back_when_selected_rows_unparseable():
     assert parsed["debug"]["fallback_workout_index"] == 1
 
 
+def test_parse_workout_wrapped_under_items_dict():
+    payload = """{
+      "items": {
+        "workouts": [
+          {"heartRateData": [{"date":"2026-04-11 09:01:06 +0200","Avg":126,"units":"bpm"}]}
+        ]
+      }
+    }"""
+    parsed = apple_hr.parse_apple_hr_json_with_debug(payload)
+    assert parsed["samples"] == [{"timestamp": "2026-04-11T07:01:06Z", "hr": 126}]
+    assert parsed["debug"]["parser_mode"] == "wrapper_dict_workouts:items"
+    assert parsed["debug"]["workouts_found"] == 1
+
+
+def test_parse_workout_wrapped_under_samples_dict():
+    payload = """{
+      "samples": {
+        "selectedWorkoutIndex": 1,
+        "workouts": [
+          {"heartRateData": []},
+          {"heartRateData": [{"date":"2026-04-11 09:01:06 +0200","Avg":126,"units":"bpm"}]}
+        ]
+      }
+    }"""
+    parsed = apple_hr.parse_apple_hr_json_with_debug(payload)
+    assert parsed["samples"] == [{"timestamp": "2026-04-11T07:01:06Z", "hr": 126}]
+    assert parsed["debug"]["parser_mode"] == "wrapper_dict_workouts:samples"
+    assert parsed["debug"]["selected_workout_index"] == 1
+
+
 def test_parse_csv_and_normalize_bounds_and_duplicates():
     payload = "timestamp,hr\n2026-04-10T12:00:00Z,150\n2026-04-10T12:00:00Z,151\n2026-04-10T12:00:01Z,20\n"
     rows = apple_hr.parse_apple_hr_csv(payload)

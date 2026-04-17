@@ -122,6 +122,48 @@ def _first_workout_with_points(workouts: list[dict], skip_index: int | None = No
     return None
 
 
+def _candidate_workout_hr_data(
+    wrapper: dict, debug: dict, parser_mode: str
+) -> tuple[list, dict] | None:
+    workouts_raw = wrapper.get("workouts")
+    if not isinstance(workouts_raw, list):
+        return None
+
+    workouts = [w for w in workouts_raw if isinstance(w, dict)]
+    debug["parser_mode"] = parser_mode
+    debug["workouts_found"] = len(workouts)
+    selected_idx, selected_explicit = _select_workout_index(workouts, wrapper)
+    debug["selected_workout_index"] = selected_idx
+
+    if selected_idx is not None:
+        hr_data = workouts[selected_idx].get("heartRateData")
+        parseable_count = _parseable_hr_point_count(hr_data)
+        has_hr = parseable_count > 0
+        debug["selected_workout_has_heart_rate_data"] = has_hr
+        debug["selected_workout_heart_rate_point_count"] = len(hr_data) if isinstance(hr_data, list) else 0
+        debug["selected_workout_parseable_point_count"] = parseable_count
+        if has_hr:
+            return hr_data, debug
+
+        # Explicitly selected workout may be empty/corrupt. Fall back to any
+        # sibling workout that actually contains HR samples.
+        fallback_idx = _first_workout_with_points(workouts, skip_index=selected_idx)
+        if fallback_idx is not None and fallback_idx != selected_idx:
+            debug["fallback_workout_index"] = fallback_idx
+            return workouts[fallback_idx]["heartRateData"], debug
+
+    if not selected_explicit:
+        fallback_idx = _first_workout_with_points(workouts)
+        if fallback_idx is not None:
+            debug["selected_workout_index"] = fallback_idx
+            debug["selected_workout_has_heart_rate_data"] = True
+            hr_data = workouts[fallback_idx].get("heartRateData")
+            debug["selected_workout_heart_rate_point_count"] = len(hr_data) if isinstance(hr_data, list) else 0
+            return hr_data, debug
+
+    return [], debug
+
+
 def _iter_json_candidates(payload) -> tuple[list, dict]:
     debug = {
         "parser_mode": "generic",
@@ -143,36 +185,14 @@ def _iter_json_candidates(payload) -> tuple[list, dict]:
 
         # Explicit Auto Health Export support: data.workouts[].heartRateData[]
         data_wrapper = payload.get("data")
-        if isinstance(data_wrapper, dict) and isinstance(data_wrapper.get("workouts"), list):
-            workouts = [w for w in data_wrapper.get("workouts", []) if isinstance(w, dict)]
-            debug["parser_mode"] = "auto_health_export_data_workouts"
-            debug["workouts_found"] = len(workouts)
-            selected_idx, selected_explicit = _select_workout_index(workouts, data_wrapper)
-            debug["selected_workout_index"] = selected_idx
-            if selected_idx is not None:
-                hr_data = workouts[selected_idx].get("heartRateData")
-                parseable_count = _parseable_hr_point_count(hr_data)
-                has_hr = parseable_count > 0
-                debug["selected_workout_has_heart_rate_data"] = has_hr
-                debug["selected_workout_heart_rate_point_count"] = len(hr_data) if isinstance(hr_data, list) else 0
-                debug["selected_workout_parseable_point_count"] = parseable_count
-                if has_hr:
-                    return hr_data, debug
-                # Explicitly selected workout may be empty/corrupt. Fall back to any
-                # sibling workout that actually contains HR samples.
-                fallback_idx = _first_workout_with_points(workouts, skip_index=selected_idx)
-                if fallback_idx is not None and fallback_idx != selected_idx:
-                    debug["fallback_workout_index"] = fallback_idx
-                    return workouts[fallback_idx]["heartRateData"], debug
-            if not selected_explicit:
-                fallback_idx = _first_workout_with_points(workouts)
-                if fallback_idx is not None:
-                    debug["selected_workout_index"] = fallback_idx
-                    debug["selected_workout_has_heart_rate_data"] = True
-                    hr_data = workouts[fallback_idx].get("heartRateData")
-                    debug["selected_workout_heart_rate_point_count"] = len(hr_data) if isinstance(hr_data, list) else 0
-                    return hr_data, debug
-            return [], debug
+        if isinstance(data_wrapper, dict):
+            workout_candidates = _candidate_workout_hr_data(
+                data_wrapper,
+                debug,
+                parser_mode="auto_health_export_data_workouts",
+            )
+            if workout_candidates is not None:
+                return workout_candidates
 
         # Common wrappers.
         for key in ("heartRateData", "heart_rate", "samples", "data", "items"):
@@ -180,6 +200,14 @@ def _iter_json_candidates(payload) -> tuple[list, dict]:
             if isinstance(value, list):
                 debug["parser_mode"] = f"wrapper_list:{key}"
                 return value, debug
+            if isinstance(value, dict):
+                workout_candidates = _candidate_workout_hr_data(
+                    value,
+                    debug,
+                    parser_mode=f"wrapper_dict_workouts:{key}",
+                )
+                if workout_candidates is not None:
+                    return workout_candidates
     return [], debug
 
 
