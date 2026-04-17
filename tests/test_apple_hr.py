@@ -134,6 +134,20 @@ def test_falls_through_when_data_workouts_has_no_points_and_wrapper_has_points()
     assert parsed["debug"]["parser_mode"] == "wrapper_list:heartRateData"
 
 
+def test_falls_through_when_earlier_dict_workout_wrapper_is_empty():
+    payload = """{
+      "data": {"workouts": [{"heartRateData": []}]},
+      "items": {
+        "workouts": [
+          {"heartRateData": [{"date":"2026-04-11 09:01:06 +0200","Avg":126,"units":"bpm"}]}
+        ]
+      }
+    }"""
+    parsed = apple_hr.parse_apple_hr_json_with_debug(payload)
+    assert parsed["samples"] == [{"timestamp": "2026-04-11T07:01:06Z", "hr": 126}]
+    assert parsed["debug"]["parser_mode"] == "wrapper_dict_workouts:items"
+
+
 def test_parse_workout_wrapped_under_items_dict():
     payload = """{
       "items": {
