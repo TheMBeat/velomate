@@ -87,22 +87,37 @@ def _select_workout_index(workouts: list[dict], data_wrapper: dict) -> tuple[int
         for idx, workout in enumerate(workouts):
             if not isinstance(workout, dict):
                 continue
-            if selected_workout_id in {
-                workout.get("id"),
-                workout.get("uuid"),
-                workout.get("workoutId"),
-                workout.get("workoutUUID"),
-            }:
+            if (
+                selected_workout_id == workout.get("id")
+                or selected_workout_id == workout.get("uuid")
+                or selected_workout_id == workout.get("workoutId")
+                or selected_workout_id == workout.get("workoutUUID")
+            ):
                 return idx, True
     return None, False
 
 
-def _first_workout_with_points(workouts: list[dict]) -> int | None:
+def _parseable_hr_point_count(hr_data) -> int:
+    if not isinstance(hr_data, list):
+        return 0
+    count = 0
+    for item in hr_data:
+        try:
+            if _sample_from_obj(item) is not None:
+                count += 1
+        except AppleHrParseError:
+            continue
+    return count
+
+
+def _first_workout_with_points(workouts: list[dict], skip_index: int | None = None) -> int | None:
     for idx, workout in enumerate(workouts):
+        if skip_index is not None and idx == skip_index:
+            continue
         if not isinstance(workout, dict):
             continue
         hr_data = workout.get("heartRateData")
-        if isinstance(hr_data, list) and hr_data:
+        if _parseable_hr_point_count(hr_data) > 0:
             return idx
     return None
 
@@ -136,14 +151,16 @@ def _iter_json_candidates(payload) -> tuple[list, dict]:
             debug["selected_workout_index"] = selected_idx
             if selected_idx is not None:
                 hr_data = workouts[selected_idx].get("heartRateData")
-                has_hr = isinstance(hr_data, list) and len(hr_data) > 0
+                parseable_count = _parseable_hr_point_count(hr_data)
+                has_hr = parseable_count > 0
                 debug["selected_workout_has_heart_rate_data"] = has_hr
                 debug["selected_workout_heart_rate_point_count"] = len(hr_data) if isinstance(hr_data, list) else 0
+                debug["selected_workout_parseable_point_count"] = parseable_count
                 if has_hr:
                     return hr_data, debug
                 # Explicitly selected workout may be empty/corrupt. Fall back to any
                 # sibling workout that actually contains HR samples.
-                fallback_idx = _first_workout_with_points(workouts)
+                fallback_idx = _first_workout_with_points(workouts, skip_index=selected_idx)
                 if fallback_idx is not None and fallback_idx != selected_idx:
                     debug["fallback_workout_index"] = fallback_idx
                     return workouts[fallback_idx]["heartRateData"], debug
@@ -179,7 +196,10 @@ def parse_apple_hr_json_with_debug(text: str) -> dict:
     candidates, debug = _iter_json_candidates(payload)
     out: list[dict] = []
     for obj in candidates:
-        sample = _sample_from_obj(obj)
+        try:
+            sample = _sample_from_obj(obj)
+        except AppleHrParseError:
+            continue
         if sample is not None:
             out.append(sample)
 
