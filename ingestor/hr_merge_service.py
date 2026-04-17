@@ -54,7 +54,12 @@ def preview_merge(fit_filename: str, fit_content: bytes, apple_content: bytes, a
     print(
         "[fit_hr_merge.preview] Apple parse: "
         f"workouts_found={apple_debug.get('workouts_found', 0)}, "
+        f"selected_index={apple_debug.get('selected_workout_index')}, "
+        f"selected_id={apple_debug.get('selected_workout_id')}, "
         f"selected_has_heartRateData={apple_debug.get('selected_workout_has_heart_rate_data', False)}, "
+        f"raw_entries={apple_debug.get('raw_heart_rate_entries_found', 0)}, "
+        f"parsed_entries={apple_debug.get('parsed_heart_rate_entries_count', len(apple_raw))}, "
+        f"rejected_entries={apple_debug.get('rejected_entries_count', 0)}, "
         f"extracted_hr_points={len(apple_raw)}, overlap_points={overlap_count}"
     )
 
