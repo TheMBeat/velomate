@@ -118,6 +118,47 @@ def test_parse_auto_health_export_falls_back_when_selected_rows_unparseable():
     assert parsed["debug"]["fallback_workout_index"] == 1
 
 
+def test_debug_includes_entry_rejections_and_selected_workout_id():
+    payload = """{
+      "data": {
+        "selectedWorkoutId": "w1",
+        "workouts": [
+          {"id": "w1", "heartRateData": [
+            {"date":"not-a-date","Avg":126,"units":"bpm"},
+            {"date":"2026-04-11 09:01:06 +0200","Avg":"bad","units":"bpm"}
+          ]},
+          {"id": "w2", "heartRateData": [{"date":"2026-04-11 09:01:07 +0200","Avg":127,"units":"bpm"}]}
+        ]
+      }
+    }"""
+    parsed = apple_hr.parse_apple_hr_json_with_debug(payload)
+    assert parsed["samples"] == [{"timestamp": "2026-04-11T07:01:07Z", "hr": 127}]
+    assert parsed["debug"]["selected_workout_index"] == 0
+    assert parsed["debug"]["selected_workout_id"] == "w1"
+    assert parsed["debug"]["fallback_workout_index"] == 1
+    assert parsed["debug"]["fallback_workout_id"] == "w2"
+    assert parsed["debug"]["raw_heart_rate_entries_found"] == 1
+    assert parsed["debug"]["parsed_heart_rate_entries_count"] == 1
+    assert parsed["debug"]["rejected_entries_count"] == 0
+
+
+def test_debug_tracks_rejection_reasons_for_unparseable_rows():
+    payload = """{
+      "heartRateData": [
+        {"date":"bad-date","Avg":126,"units":"bpm"},
+        {"date":"2026-04-11 09:01:06 +0200","Avg":"bad","units":"bpm"},
+        {"date":"2026-04-11 09:01:07 +0200","Avg":127,"units":"bpm"}
+      ]
+    }"""
+    parsed = apple_hr.parse_apple_hr_json_with_debug(payload)
+    assert parsed["samples"] == [{"timestamp": "2026-04-11T07:01:07Z", "hr": 127}]
+    assert parsed["debug"]["raw_heart_rate_entries_found"] == 3
+    assert parsed["debug"]["parsed_heart_rate_entries_count"] == 1
+    assert parsed["debug"]["rejected_entries_count"] == 2
+    assert parsed["debug"]["rejection_reasons"]["Invalid timestamp format: bad-date"] == 1
+    assert parsed["debug"]["rejection_reasons"]["Invalid HR value: bad"] == 1
+
+
 def test_falls_through_when_data_workouts_has_no_points_and_wrapper_has_points():
     payload = """{
       "data": {

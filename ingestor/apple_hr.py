@@ -28,10 +28,16 @@ def _empty_debug(parser_mode: str = "generic") -> dict[str, Any]:
         "parser_mode": parser_mode,
         "workouts_found": 0,
         "selected_workout_index": None,
+        "selected_workout_id": None,
         "selected_workout_has_heart_rate_data": False,
         "selected_workout_heart_rate_point_count": 0,
         "selected_workout_parseable_point_count": 0,
         "fallback_workout_index": None,
+        "fallback_workout_id": None,
+        "raw_heart_rate_entries_found": 0,
+        "parsed_heart_rate_entries_count": 0,
+        "rejected_entries_count": 0,
+        "rejection_reasons": {},
         "extracted_hr_points": 0,
     }
 
@@ -89,22 +95,45 @@ def _sample_from_obj(obj: dict) -> dict | None:
     }
 
 
-def _parse_samples(candidates: list[Any]) -> list[dict]:
+def _rejection_reason(exc: Exception) -> str:
+    message = str(exc).strip()
+    return message or exc.__class__.__name__
+
+
+def _parse_samples(candidates: list[Any]) -> tuple[list[dict], int, dict[str, int]]:
     samples: list[dict] = []
+    rejection_reasons: dict[str, int] = {}
+    rejected = 0
     for obj in candidates:
         try:
             sample = _sample_from_obj(obj)
-        except AppleHrParseError:
+        except AppleHrParseError as exc:
+            rejected += 1
+            reason = _rejection_reason(exc)
+            rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
             continue
         if sample is not None:
             samples.append(sample)
-    return samples
+        else:
+            rejected += 1
+            reason = "Missing timestamp or HR value"
+            rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
+    return samples, rejected, rejection_reasons
 
 
 def _parseable_hr_point_count(hr_data: Any) -> int:
     if not isinstance(hr_data, list):
         return 0
-    return len(_parse_samples(hr_data))
+    parsed, _, _ = _parse_samples(hr_data)
+    return len(parsed)
+
+
+def _workout_identifier(workout: dict) -> Any:
+    for key in WORKOUT_ID_KEYS:
+        value = workout.get(key)
+        if value not in (None, ""):
+            return value
+    return None
 
 
 def _find_matching_workout_index(workouts: list[dict], wrapper: dict) -> tuple[int | None, bool]:
@@ -166,17 +195,20 @@ def _discover_workout_candidates(wrapper: Any, parser_mode: str) -> tuple[list, 
     debug["selected_workout_index"] = selected_idx
 
     if selected_idx is not None:
-        hr_data = workouts[selected_idx].get("heartRateData")
+        selected_workout = workouts[selected_idx]
+        hr_data = selected_workout.get("heartRateData")
         parseable_count = _parseable_hr_point_count(hr_data)
+        debug["selected_workout_id"] = _workout_identifier(selected_workout)
         debug["selected_workout_heart_rate_point_count"] = len(hr_data) if isinstance(hr_data, list) else 0
         debug["selected_workout_parseable_point_count"] = parseable_count
-        debug["selected_workout_has_heart_rate_data"] = parseable_count > 0
+        debug["selected_workout_has_heart_rate_data"] = isinstance(hr_data, list) and len(hr_data) > 0
         if parseable_count > 0:
             return hr_data, debug
 
         fallback_idx = _first_workout_with_points(workouts, skip_index=selected_idx)
         if fallback_idx is not None:
             debug["fallback_workout_index"] = fallback_idx
+            debug["fallback_workout_id"] = _workout_identifier(workouts[fallback_idx])
             return workouts[fallback_idx]["heartRateData"], debug
 
     if not selected_explicit:
@@ -184,6 +216,7 @@ def _discover_workout_candidates(wrapper: Any, parser_mode: str) -> tuple[list, 
         if fallback_idx is not None:
             hr_data = workouts[fallback_idx].get("heartRateData")
             debug["selected_workout_index"] = fallback_idx
+            debug["selected_workout_id"] = _workout_identifier(workouts[fallback_idx])
             debug["selected_workout_has_heart_rate_data"] = True
             debug["selected_workout_heart_rate_point_count"] = len(hr_data) if isinstance(hr_data, list) else 0
             debug["selected_workout_parseable_point_count"] = _parseable_hr_point_count(hr_data)
@@ -203,20 +236,28 @@ def _iter_json_candidates(payload: Any) -> tuple[list, dict]:
     if direct is not None:
         return [payload], _empty_debug("single_sample_object")
 
+    first_workout_debug = None
     result = _discover_workout_candidates(payload.get("data"), parser_mode="auto_health_export_data_workouts")
-    if result is not None and result[0]:
-        return result
+    if result is not None:
+        if result[0]:
+            return result
+        first_workout_debug = result[1]
 
     for key in WORKOUT_WRAPPER_KEYS:
         wrapper = payload.get(key)
         result = _discover_workout_candidates(wrapper, parser_mode=f"wrapper_dict_workouts:{key}")
-        if result is not None and result[0]:
-            return result
+        if result is not None:
+            if result[0]:
+                return result
+            if first_workout_debug is None:
+                first_workout_debug = result[1]
     for key in DIRECT_LIST_WRAPPER_KEYS:
         value = payload.get(key)
         if isinstance(value, list):
             return value, _empty_debug(parser_mode=f"wrapper_list:{key}")
 
+    if first_workout_debug is not None:
+        return [], first_workout_debug
     return [], _empty_debug()
 
 
@@ -227,7 +268,11 @@ def _parse_json_payload_with_debug(text: str) -> tuple[list[dict], dict]:
         raise AppleHrParseError("Invalid JSON payload") from exc
 
     candidates, debug = _iter_json_candidates(payload)
-    samples = _parse_samples(candidates)
+    samples, rejected, rejection_reasons = _parse_samples(candidates)
+    debug["raw_heart_rate_entries_found"] = len(candidates)
+    debug["parsed_heart_rate_entries_count"] = len(samples)
+    debug["rejected_entries_count"] = rejected
+    debug["rejection_reasons"] = rejection_reasons
     debug["extracted_hr_points"] = len(samples)
     return samples, debug
 
@@ -241,15 +286,22 @@ def parse_apple_hr_json_with_debug(text: str) -> dict:
     print(
         "[apple_hr] JSON parse debug: "
         f"mode={debug['parser_mode']}, workouts_found={debug['workouts_found']}, "
+        f"selected_idx={debug['selected_workout_index']}, "
+        f"selected_id={debug['selected_workout_id']}, "
         f"selected_has_heartRateData={debug['selected_workout_has_heart_rate_data']}, "
-        f"extracted_hr_points={debug['extracted_hr_points']}"
+        f"raw_entries={debug['raw_heart_rate_entries_found']}, "
+        f"parsed_entries={debug['parsed_heart_rate_entries_count']}, "
+        f"rejected_entries={debug['rejected_entries_count']}"
     )
+    if debug["rejected_entries_count"] > 0:
+        print(f"[apple_hr] JSON parse rejections: {debug['rejection_reasons']}")
     return {"samples": samples, "debug": debug}
 
 
 def parse_apple_hr_csv(text: str) -> list[dict]:
     reader = csv.DictReader(StringIO(text))
-    return _parse_samples(list(reader))
+    samples, _rejected, _reasons = _parse_samples(list(reader))
+    return samples
 
 
 def parse_apple_hr_text_details(text: str, source_type: str = "auto") -> dict:
@@ -260,7 +312,16 @@ def parse_apple_hr_text_details(text: str, source_type: str = "auto") -> dict:
         return parsed
     if mode == "csv":
         samples = parse_apple_hr_csv(text)
-        return {"samples": samples, "source_type": "csv", "debug": _empty_debug("csv") | {"extracted_hr_points": len(samples)}}
+        return {
+            "samples": samples,
+            "source_type": "csv",
+            "debug": _empty_debug("csv")
+            | {
+                "raw_heart_rate_entries_found": len(samples),
+                "parsed_heart_rate_entries_count": len(samples),
+                "extracted_hr_points": len(samples),
+            },
+        }
     if mode == "auto":
         stripped = text.lstrip()
         inferred_mode = "json" if stripped.startswith(("{", "[")) else "csv"
