@@ -191,7 +191,7 @@ def _iter_json_candidates(payload) -> tuple[list, dict]:
                 debug,
                 parser_mode="auto_health_export_data_workouts",
             )
-            if workout_candidates is not None:
+            if workout_candidates is not None and workout_candidates[0]:
                 return workout_candidates
 
         # Common wrappers.
