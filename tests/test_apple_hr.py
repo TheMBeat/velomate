@@ -32,6 +32,29 @@ def test_parse_auto_health_export_nested_workouts_json():
     assert rows == [{"timestamp": "2026-04-11T07:01:06Z", "hr": 126}]
 
 
+def test_parse_auto_health_export_selected_workout_only():
+    payload = """{
+      "data": {
+        "selectedWorkoutId": "w2",
+        "workouts": [
+          {"id": "w1", "heartRateData": [{"date":"2026-04-11 09:00:00 +0200","Avg":111,"units":"bpm"}]},
+          {"id": "w2", "heartRateData": [
+            {"date":"2026-04-11 09:01:06 +0200","Avg":126,"units":"bpm"},
+            {"date":"2026-04-11 09:01:07 +0200","Avg":127,"units":"bpm"}
+          ]}
+        ]
+      }
+    }"""
+    parsed = apple_hr.parse_apple_hr_json_with_debug(payload)
+    assert parsed["samples"] == [
+        {"timestamp": "2026-04-11T07:01:06Z", "hr": 126},
+        {"timestamp": "2026-04-11T07:01:07Z", "hr": 127},
+    ]
+    assert parsed["debug"]["workouts_found"] == 2
+    assert parsed["debug"]["selected_workout_has_heart_rate_data"] is True
+    assert parsed["debug"]["extracted_hr_points"] == 2
+
+
 def test_parse_csv_and_normalize_bounds_and_duplicates():
     payload = "timestamp,hr\n2026-04-10T12:00:00Z,150\n2026-04-10T12:00:00Z,151\n2026-04-10T12:00:01Z,20\n"
     rows = apple_hr.parse_apple_hr_csv(payload)
