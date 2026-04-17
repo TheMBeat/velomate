@@ -179,6 +179,18 @@ def _first_workout_with_points(workouts: list[dict], skip_index: int | None = No
     return None
 
 
+def _first_workout_with_raw_entries(workouts: list[dict], skip_index: int | None = None) -> int | None:
+    for idx, workout in enumerate(workouts):
+        if skip_index is not None and idx == skip_index:
+            continue
+        if not isinstance(workout, dict):
+            continue
+        hr_data = workout.get("heartRateData")
+        if isinstance(hr_data, list) and len(hr_data) > 0:
+            return idx
+    return None
+
+
 def _discover_workout_candidates(wrapper: Any, parser_mode: str) -> tuple[list, dict] | None:
     if not isinstance(wrapper, dict):
         return None
@@ -210,6 +222,8 @@ def _discover_workout_candidates(wrapper: Any, parser_mode: str) -> tuple[list, 
             debug["fallback_workout_index"] = fallback_idx
             debug["fallback_workout_id"] = _workout_identifier(workouts[fallback_idx])
             return workouts[fallback_idx]["heartRateData"], debug
+        if isinstance(hr_data, list) and len(hr_data) > 0:
+            return hr_data, debug
 
     if not selected_explicit:
         fallback_idx = _first_workout_with_points(workouts)
@@ -220,6 +234,15 @@ def _discover_workout_candidates(wrapper: Any, parser_mode: str) -> tuple[list, 
             debug["selected_workout_has_heart_rate_data"] = True
             debug["selected_workout_heart_rate_point_count"] = len(hr_data) if isinstance(hr_data, list) else 0
             debug["selected_workout_parseable_point_count"] = _parseable_hr_point_count(hr_data)
+            return hr_data, debug
+        fallback_idx = _first_workout_with_raw_entries(workouts)
+        if fallback_idx is not None:
+            hr_data = workouts[fallback_idx].get("heartRateData")
+            debug["selected_workout_index"] = fallback_idx
+            debug["selected_workout_id"] = _workout_identifier(workouts[fallback_idx])
+            debug["selected_workout_has_heart_rate_data"] = True
+            debug["selected_workout_heart_rate_point_count"] = len(hr_data) if isinstance(hr_data, list) else 0
+            debug["selected_workout_parseable_point_count"] = 0
             return hr_data, debug
 
     return [], debug
