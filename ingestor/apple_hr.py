@@ -260,25 +260,36 @@ def _iter_json_candidates(payload: Any) -> tuple[list, dict]:
         return [payload], _empty_debug("single_sample_object")
 
     first_workout_debug = None
+    first_unparseable_candidates: tuple[list, dict] | None = None
     result = _discover_workout_candidates(payload.get("data"), parser_mode="auto_health_export_data_workouts")
     if result is not None:
-        if result[0]:
+        if result[0] and _parseable_hr_point_count(result[0]) > 0:
             return result
+        if result[0] and first_unparseable_candidates is None:
+            first_unparseable_candidates = result
         first_workout_debug = result[1]
 
     for key in WORKOUT_WRAPPER_KEYS:
         wrapper = payload.get(key)
         result = _discover_workout_candidates(wrapper, parser_mode=f"wrapper_dict_workouts:{key}")
         if result is not None:
-            if result[0]:
+            if result[0] and _parseable_hr_point_count(result[0]) > 0:
                 return result
+            if result[0] and first_unparseable_candidates is None:
+                first_unparseable_candidates = result
             if first_workout_debug is None:
                 first_workout_debug = result[1]
     for key in DIRECT_LIST_WRAPPER_KEYS:
         value = payload.get(key)
         if isinstance(value, list):
-            return value, _empty_debug(parser_mode=f"wrapper_list:{key}")
+            list_result = (value, _empty_debug(parser_mode=f"wrapper_list:{key}"))
+            if _parseable_hr_point_count(value) > 0:
+                return list_result
+            if first_unparseable_candidates is None:
+                first_unparseable_candidates = list_result
 
+    if first_unparseable_candidates is not None:
+        return first_unparseable_candidates
     if first_workout_debug is not None:
         return [], first_workout_debug
     return [], _empty_debug()

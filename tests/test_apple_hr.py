@@ -137,6 +137,23 @@ def test_selected_workout_unparseable_rows_are_counted_in_debug():
     assert parsed["debug"]["rejection_reasons"]["Invalid timestamp format: bad-date"] == 1
 
 
+def test_unparseable_selected_workout_still_falls_through_to_parseable_wrapper_list():
+    payload = """{
+      "data": {
+        "selectedWorkoutId": "w1",
+        "workouts": [
+          {"id": "w1", "heartRateData": [{"date":"bad-date","Avg":126,"units":"bpm"}]}
+        ]
+      },
+      "heartRateData": [
+        {"date":"2026-04-11 09:01:06 +0200","Avg":128,"units":"bpm"}
+      ]
+    }"""
+    parsed = apple_hr.parse_apple_hr_json_with_debug(payload)
+    assert parsed["samples"] == [{"timestamp": "2026-04-11T07:01:06Z", "hr": 128}]
+    assert parsed["debug"]["parser_mode"] == "wrapper_list:heartRateData"
+
+
 def test_debug_includes_entry_rejections_and_selected_workout_id():
     payload = """{
       "data": {
