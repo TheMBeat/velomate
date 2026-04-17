@@ -11,6 +11,13 @@ from hr_fit_merge import (
     render_merged_output_fit,
 )
 
+def _build_apple_debug_response(apple_parsed: dict) -> dict:
+    debug = dict(apple_parsed.get("debug", {}))
+    samples = list(apple_parsed.get("samples", []))
+    debug["detected_source_type"] = apple_parsed.get("source_type")
+    debug["sample_preview"] = samples[:5]
+    return debug
+
 
 def parse_bool_flag(value, *, default: bool) -> bool:
     if value is None:
@@ -46,13 +53,15 @@ def preview_merge(fit_filename: str, fit_content: bytes, apple_content: bytes, a
     fit_payload = parse_fit_records_for_merge(fit_content)
     apple_parsed = parse_apple_hr_payload_details(apple_content, source_type=apple_source_type)
     apple_raw = apple_parsed["samples"]
-    apple_debug = apple_parsed.get("debug", {})
+    apple_debug = _build_apple_debug_response(apple_parsed)
 
     fit_start = fit_payload["summary"]["start_time"]
     fit_end = fit_payload["summary"]["end_time"]
     overlap_count = sum(1 for row in apple_raw if fit_start <= row.get("timestamp", "") <= fit_end)
     print(
         "[fit_hr_merge.preview] Apple parse: "
+        f"detected_source_type={apple_debug.get('detected_source_type')}, "
+        f"parser_mode={apple_debug.get('parser_mode')}, "
         f"workouts_found={apple_debug.get('workouts_found', 0)}, "
         f"selected_index={apple_debug.get('selected_workout_index')}, "
         f"selected_id={apple_debug.get('selected_workout_id')}, "
@@ -62,14 +71,21 @@ def preview_merge(fit_filename: str, fit_content: bytes, apple_content: bytes, a
         f"rejected_entries={apple_debug.get('rejected_entries_count', 0)}, "
         f"extracted_hr_points={len(apple_raw)}, overlap_points={overlap_count}"
     )
+    if apple_debug.get("detected_source_type") != apple_debug.get("parser_mode"):
+        print(
+            "[fit_hr_merge.preview] WARNING: detected_source_type does not match parser_mode "
+            f"({apple_debug.get('detected_source_type')} vs {apple_debug.get('parser_mode')})"
+        )
 
     return {
         "fit_filename": fit_filename,
         "fit_bytes": fit_content,
         "fit_records": fit_payload["records"],
         "apple_raw": apple_raw,
+        "apple_debug": apple_debug,
     }, {
         "fit_summary": fit_payload["summary"],
+        "apple_debug": apple_debug,
         "apple_summary": {
             "point_count": len(apple_raw),
             "first_timestamp": apple_raw[0]["timestamp"] if apple_raw else None,
