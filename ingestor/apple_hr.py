@@ -304,6 +304,19 @@ def parse_apple_hr_csv(text: str) -> list[dict]:
     return samples
 
 
+def parse_apple_hr_csv_with_debug(text: str) -> tuple[list[dict], dict[str, Any]]:
+    reader = csv.DictReader(StringIO(text))
+    raw_rows = list(reader)
+    samples, rejected, rejection_reasons = _parse_samples(raw_rows)
+    debug = _empty_debug("csv")
+    debug["raw_heart_rate_entries_found"] = len(raw_rows)
+    debug["parsed_heart_rate_entries_count"] = len(samples)
+    debug["rejected_entries_count"] = rejected
+    debug["rejection_reasons"] = rejection_reasons
+    debug["extracted_hr_points"] = len(samples)
+    return samples, debug
+
+
 def parse_apple_hr_text_details(text: str, source_type: str = "auto") -> dict:
     mode = (source_type or "auto").lower()
     if mode == "json":
@@ -311,16 +324,11 @@ def parse_apple_hr_text_details(text: str, source_type: str = "auto") -> dict:
         parsed["source_type"] = "json"
         return parsed
     if mode == "csv":
-        samples = parse_apple_hr_csv(text)
+        samples, debug = parse_apple_hr_csv_with_debug(text)
         return {
             "samples": samples,
             "source_type": "csv",
-            "debug": _empty_debug("csv")
-            | {
-                "raw_heart_rate_entries_found": len(samples),
-                "parsed_heart_rate_entries_count": len(samples),
-                "extracted_hr_points": len(samples),
-            },
+            "debug": debug,
         }
     if mode == "auto":
         stripped = text.lstrip()
