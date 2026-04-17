@@ -71,6 +71,7 @@ def _run_hr_merge(import_token: str, options: MergeOptions) -> dict:
         "artifact_token": artifact_token,
         "download_url": f"/tools/fit-hr-merge/download?token={artifact_token}",
         "report": report,
+        "apple_debug": payload.get("apple_debug", {}),
         "output_format": "fit",
     }
 
@@ -98,6 +99,9 @@ def _render_hr_merge_page() -> str:
       .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
       .btn{background:#2563eb;color:#fff;border:0;border-radius:8px;padding:10px 14px;margin-top:10px}
       .muted{color:#9ca3af}
+      .debug-panel{margin-top:12px;border:1px solid #374151;border-radius:8px;background:#111827}
+      .debug-panel summary{cursor:pointer;padding:10px 12px;font-weight:600}
+      .debug-panel pre{margin:0 12px 12px 12px}
       input,select{background:#111827;color:#e5e7eb;border:1px solid #374151;border-radius:6px;padding:6px}
       pre{white-space:pre-wrap;background:#111827;border:1px solid #374151;padding:12px;border-radius:8px}
     </style>
@@ -129,11 +133,46 @@ def _render_hr_merge_page() -> str:
           </div>
           <button class='btn' type='submit'>Run Merge</button>
         </form>
+        <details id='appleDebugPanel' class='debug-panel'>
+          <summary>Apple Parse Debug</summary>
+          <pre id='appleDebugOutput' class='muted'>No parser debug available yet.</pre>
+        </details>
         <pre id='output' class='muted'>Preview results will appear here.</pre>
       </div>
       <script>
         let importToken = null;
         const output = document.getElementById('output');
+        const appleDebugOutput = document.getElementById('appleDebugOutput');
+        const appleDebugPanel = document.getElementById('appleDebugPanel');
+
+        const renderAppleDebug = (data) => {
+          const appleDebug = data.apple_debug || (data.apple_summary && data.apple_summary.debug) || null;
+          if (!appleDebug) {
+            appleDebugOutput.textContent = 'No parser debug available for this response.';
+            return;
+          }
+          const compact = {
+            detected_source_type: appleDebug.detected_source_type ?? null,
+            parser_mode: appleDebug.parser_mode ?? null,
+            top_level_keys: appleDebug.top_level_keys ?? [],
+            data_keys: appleDebug.data_keys ?? [],
+            workouts_found: appleDebug.workouts_found ?? 0,
+            selected_workout_index: appleDebug.selected_workout_index ?? null,
+            selected_workout_id: appleDebug.selected_workout_id ?? null,
+            selected_workout_has_heart_rate_data: appleDebug.selected_workout_has_heart_rate_data ?? false,
+            selected_workout_heart_rate_point_count: appleDebug.selected_workout_heart_rate_point_count ?? 0,
+            selected_workout_parseable_point_count: appleDebug.selected_workout_parseable_point_count ?? 0,
+            fallback_workout_index: appleDebug.fallback_workout_index ?? null,
+            raw_heart_rate_entries_found: appleDebug.raw_heart_rate_entries_found ?? 0,
+            parsed_heart_rate_entries_count: appleDebug.parsed_heart_rate_entries_count ?? 0,
+            rejected_entries_count: appleDebug.rejected_entries_count ?? 0,
+            rejection_reasons: appleDebug.rejection_reasons ?? {},
+            sample_preview: appleDebug.sample_preview ?? []
+          };
+          appleDebugOutput.textContent = JSON.stringify(compact, null, 2);
+          appleDebugPanel.open = true;
+        };
+
         document.getElementById('previewForm').addEventListener('submit', async (e) => {
           e.preventDefault();
           const fd = new FormData(e.target);
@@ -143,6 +182,7 @@ def _render_hr_merge_page() -> str:
             importToken = data.import_token;
             document.querySelector('#runForm input[name="import_token"]').value = importToken;
           }
+          renderAppleDebug(data);
           output.textContent = JSON.stringify(data, null, 2);
         });
         document.getElementById('runForm').addEventListener('submit', async (e) => {
@@ -162,6 +202,7 @@ def _render_hr_merge_page() -> str:
             body: JSON.stringify(payload)
           });
           const data = await res.json();
+          renderAppleDebug(data);
           output.textContent = JSON.stringify(data, null, 2);
           if (data.download_url) {
             const a = document.createElement('a');

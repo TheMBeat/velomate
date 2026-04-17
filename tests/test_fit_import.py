@@ -207,3 +207,21 @@ def test_api_merge_run_passes_matching_strategy_option():
     options = run_merge.call_args.args[1]
     assert options.matching_strategy == "interpolate"
     send_json.assert_called_once_with(200, {"ok": True})
+
+
+def test_run_hr_merge_includes_apple_debug_in_response():
+    token = webapp._store_pending(
+        {
+            "fit_filename": "ride.fit",
+            "fit_bytes": b"fit",
+            "fit_records": [{"timestamp": "2026-01-01T00:00:00Z", "hr": None}],
+            "apple_raw": [{"timestamp": "2026-01-01T00:00:00Z", "hr": 120}],
+            "apple_debug": {"detected_source_type": "json", "parser_mode": "json", "sample_preview": [{"timestamp": "2026-01-01T00:00:00Z", "hr": 120}]},
+        }
+    )
+    with patch("webapp.run_merge", return_value=("merged.fit", b"bytes", {"hr_points_written": 1})):
+        result = webapp._run_hr_merge(token, webapp.MergeOptions())
+
+    assert result["apple_debug"]["detected_source_type"] == "json"
+    assert result["apple_debug"]["parser_mode"] == "json"
+    assert result["apple_debug"]["sample_preview"][0]["hr"] == 120

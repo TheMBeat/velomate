@@ -83,10 +83,21 @@ def parse_apple_hr_payload(content: bytes, source_type: str = "auto") -> list[di
 
 def parse_apple_hr_payload_details(content: bytes, source_type: str = "auto") -> dict:
     text = content.decode("utf-8", errors="replace")
+    print(
+        "[fit_hr_merge.parse_apple_hr_payload_details] "
+        f"source_type_request={source_type}, bytes={len(content)}, decoded_chars={len(text)}"
+    )
     try:
-        return parse_apple_hr_text_details(text, source_type=source_type)
+        result = parse_apple_hr_text_details(text, source_type=source_type)
     except AppleHrParseError as exc:
         raise FitHrMergeError(str(exc)) from exc
+    print(
+        "[fit_hr_merge.parse_apple_hr_payload_details] "
+        f"detected_source_type={result.get('source_type')}, "
+        f"parser_mode={result.get('debug', {}).get('parser_mode')}, "
+        f"samples_from_result={len(result.get('samples', []))}"
+    )
+    return result
 
 
 def merge_fit_with_hr(fit_records: list[dict], hr_series: list[dict], options: MergeOptions) -> tuple[list[dict], dict]:
