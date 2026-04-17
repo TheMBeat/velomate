@@ -6,7 +6,7 @@ from hr_fit_merge import (
     FitHrMergeError,
     MergeOptions,
     merge_fit_with_hr,
-    parse_apple_hr_payload,
+    parse_apple_hr_payload_details,
     parse_fit_records_for_merge,
     render_merged_output_fit,
 )
@@ -44,11 +44,23 @@ def preview_merge(fit_filename: str, fit_content: bytes, apple_content: bytes, a
         raise FitHrMergeError("FIT input must end with .fit")
 
     fit_payload = parse_fit_records_for_merge(fit_content)
-    apple_raw = parse_apple_hr_payload(apple_content, source_type=apple_source_type)
-
     fit_start = fit_payload["summary"]["start_time"]
     fit_end = fit_payload["summary"]["end_time"]
+    apple_parsed = parse_apple_hr_payload_details(
+        apple_content,
+        source_type=apple_source_type,
+        fit_time_window=(fit_start, fit_end),
+    )
+    apple_raw = apple_parsed["samples"]
+    apple_debug = apple_parsed.get("debug", {})
+
     overlap_count = sum(1 for row in apple_raw if fit_start <= row.get("timestamp", "") <= fit_end)
+    print(
+        "[fit_hr_merge.preview] Apple parse: "
+        f"workouts_found={apple_debug.get('workouts_found', 0)}, "
+        f"selected_has_heartRateData={apple_debug.get('selected_workout_has_heart_rate_data', False)}, "
+        f"extracted_hr_points={len(apple_raw)}, overlap_points={overlap_count}"
+    )
 
     return {
         "fit_filename": fit_filename,
@@ -61,6 +73,7 @@ def preview_merge(fit_filename: str, fit_content: bytes, apple_content: bytes, a
             "point_count": len(apple_raw),
             "first_timestamp": apple_raw[0]["timestamp"] if apple_raw else None,
             "last_timestamp": apple_raw[-1]["timestamp"] if apple_raw else None,
+            "debug": apple_debug,
         },
         "estimated_overlap_points": overlap_count,
         "warnings": [] if overlap_count else ["Low overlap between Apple HR and FIT timeline; verify timezone/export range."],
