@@ -47,6 +47,26 @@ def test_parse_apple_hr_payload_details_supports_data_workouts_structure():
     assert parsed["debug"]["extracted_hr_points"] == 1
 
 
+def test_parse_apple_hr_payload_details_csv_includes_debug_envelope():
+    payload = b"timestamp,hr\n2026-04-11T07:01:06Z,126\n"
+    parsed = hr_fit_merge.parse_apple_hr_payload_details(payload, source_type="csv")
+    assert parsed["source_type"] == "csv"
+    assert parsed["samples"] == [{"timestamp": "2026-04-11T07:01:06Z", "hr": 126}]
+    assert parsed["debug"]["parser_mode"] == "csv"
+    assert parsed["debug"]["extracted_hr_points"] == 1
+
+
+def test_parse_apple_hr_payload_details_csv_tracks_rejections():
+    payload = b"timestamp,hr\n2026-04-11T07:01:06Z,126\nbad-date,130\n2026-04-11T07:01:07Z,bad\n"
+    parsed = hr_fit_merge.parse_apple_hr_payload_details(payload, source_type="csv")
+    assert parsed["samples"] == [{"timestamp": "2026-04-11T07:01:06Z", "hr": 126}]
+    assert parsed["debug"]["raw_heart_rate_entries_found"] == 3
+    assert parsed["debug"]["parsed_heart_rate_entries_count"] == 1
+    assert parsed["debug"]["rejected_entries_count"] == 2
+    assert parsed["debug"]["rejection_reasons"]["Invalid timestamp format: bad-date"] == 1
+    assert parsed["debug"]["rejection_reasons"]["Invalid HR value: bad"] == 1
+
+
 def test_merge_with_overwrite_replaces_existing_hr():
     fit_records = [{"timestamp": "2026-04-11T07:01:05Z", "hr": 140}]
     apple = [{"timestamp": "2026-04-11T07:01:05Z", "hr": 150}]
