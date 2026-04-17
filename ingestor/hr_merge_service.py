@@ -44,12 +44,16 @@ def preview_merge(fit_filename: str, fit_content: bytes, apple_content: bytes, a
         raise FitHrMergeError("FIT input must end with .fit")
 
     fit_payload = parse_fit_records_for_merge(fit_content)
-    apple_parsed = parse_apple_hr_payload_details(apple_content, source_type=apple_source_type)
+    fit_start = fit_payload["summary"]["start_time"]
+    fit_end = fit_payload["summary"]["end_time"]
+    apple_parsed = parse_apple_hr_payload_details(
+        apple_content,
+        source_type=apple_source_type,
+        fit_time_window=(fit_start, fit_end),
+    )
     apple_raw = apple_parsed["samples"]
     apple_debug = apple_parsed.get("debug", {})
 
-    fit_start = fit_payload["summary"]["start_time"]
-    fit_end = fit_payload["summary"]["end_time"]
     overlap_count = sum(1 for row in apple_raw if fit_start <= row.get("timestamp", "") <= fit_end)
     print(
         "[fit_hr_merge.preview] Apple parse: "

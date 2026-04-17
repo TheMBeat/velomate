@@ -74,15 +74,18 @@ def _select_workout_index(workouts: list[dict], data_wrapper: dict) -> int | Non
         return None
 
     selected_index = data_wrapper.get("selectedWorkoutIndex")
+    selected_id_fields = (
+        data_wrapper.get("selectedWorkoutId"),
+        data_wrapper.get("selectedWorkoutUUID"),
+        data_wrapper.get("workoutId"),
+        data_wrapper.get("workoutUUID"),
+    )
+    has_explicit_selector = selected_index is not None or any(v is not None for v in selected_id_fields)
+
     if isinstance(selected_index, int) and 0 <= selected_index < len(workouts):
         return selected_index
 
-    selected_workout_id = (
-        data_wrapper.get("selectedWorkoutId")
-        or data_wrapper.get("selectedWorkoutUUID")
-        or data_wrapper.get("workoutId")
-        or data_wrapper.get("workoutUUID")
-    )
+    selected_workout_id = next((v for v in selected_id_fields if v is not None), None)
     if selected_workout_id is not None:
         for idx, workout in enumerate(workouts):
             if not isinstance(workout, dict):
@@ -95,19 +98,68 @@ def _select_workout_index(workouts: list[dict], data_wrapper: dict) -> int | Non
             }:
                 return idx
 
+    if has_explicit_selector:
+        return None
+
     for idx, workout in enumerate(workouts):
         if isinstance(workout, dict) and isinstance(workout.get("heartRateData"), list):
             return idx
     return None
 
 
-def _iter_json_candidates(payload) -> tuple[list, dict]:
+def _parse_window_utc(window: tuple[str, str] | None) -> tuple[datetime, datetime] | None:
+    if not window:
+        return None
+    start_raw, end_raw = window
+    return _parse_timestamp(start_raw), _parse_timestamp(end_raw)
+
+
+def _pick_best_workout_by_time_overlap(
+    workouts: list[dict],
+    candidate_indices: list[int],
+    fit_window_utc: tuple[datetime, datetime] | None,
+) -> int | None:
+    if not candidate_indices:
+        return None
+    if fit_window_utc is None:
+        return candidate_indices[0]
+
+    fit_start, fit_end = fit_window_utc
+    best_idx = None
+    best_overlap = -1
+    best_count = -1
+
+    for idx in candidate_indices:
+        hr_data = workouts[idx].get("heartRateData")
+        if not isinstance(hr_data, list):
+            continue
+        overlap = 0
+        count = 0
+        for item in hr_data:
+            sample = _sample_from_obj(item)
+            if sample is None:
+                continue
+            count += 1
+            ts = _parse_timestamp(sample["timestamp"])
+            if fit_start <= ts <= fit_end:
+                overlap += 1
+        if overlap > best_overlap or (overlap == best_overlap and count > best_count):
+            best_idx = idx
+            best_overlap = overlap
+            best_count = count
+
+    return best_idx
+
+
+def _iter_json_candidates(payload, *, fit_time_window: tuple[str, str] | None = None) -> tuple[list, dict]:
     debug = {
         "parser_mode": "generic",
         "workouts_found": 0,
         "selected_workout_index": None,
+        "resolved_workout_index": None,
         "selected_workout_has_heart_rate_data": False,
         "selected_workout_heart_rate_point_count": 0,
+        "fallback_used": False,
     }
 
     if isinstance(payload, list):
@@ -128,13 +180,27 @@ def _iter_json_candidates(payload) -> tuple[list, dict]:
             debug["workouts_found"] = len(workouts)
             selected_idx = _select_workout_index(workouts, data_wrapper)
             debug["selected_workout_index"] = selected_idx
+            fit_window_utc = _parse_window_utc(fit_time_window)
+
+            candidate_indices = []
+            for idx, workout in enumerate(workouts):
+                if isinstance(workout.get("heartRateData"), list):
+                    candidate_indices.append(idx)
+
             if selected_idx is not None:
                 hr_data = workouts[selected_idx].get("heartRateData")
                 has_hr = isinstance(hr_data, list)
                 debug["selected_workout_has_heart_rate_data"] = has_hr
                 debug["selected_workout_heart_rate_point_count"] = len(hr_data) if has_hr else 0
                 if has_hr:
+                    debug["resolved_workout_index"] = selected_idx
                     return hr_data, debug
+
+            fallback_idx = _pick_best_workout_by_time_overlap(workouts, candidate_indices, fit_window_utc)
+            if fallback_idx is not None:
+                debug["fallback_used"] = True
+                debug["resolved_workout_index"] = fallback_idx
+                return workouts[fallback_idx].get("heartRateData"), debug
             return [], debug
 
         # Common wrappers.
@@ -150,13 +216,13 @@ def parse_apple_hr_json(text: str) -> list[dict]:
     return parse_apple_hr_json_with_debug(text)["samples"]
 
 
-def parse_apple_hr_json_with_debug(text: str) -> dict:
+def parse_apple_hr_json_with_debug(text: str, *, fit_time_window: tuple[str, str] | None = None) -> dict:
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as exc:
         raise AppleHrParseError("Invalid JSON payload") from exc
 
-    candidates, debug = _iter_json_candidates(payload)
+    candidates, debug = _iter_json_candidates(payload, fit_time_window=fit_time_window)
     out: list[dict] = []
     for obj in candidates:
         sample = _sample_from_obj(obj)

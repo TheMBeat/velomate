@@ -55,6 +55,42 @@ def test_parse_auto_health_export_selected_workout_only():
     assert parsed["debug"]["extracted_hr_points"] == 2
 
 
+def test_parse_auto_health_export_falls_back_when_selected_has_no_hr():
+    payload = """{
+      "data": {
+        "selectedWorkoutId": "w2",
+        "workouts": [
+          {"id": "w1", "heartRateData": [{"date":"2026-04-11 09:01:06 +0200","Avg":126,"units":"bpm"}]},
+          {"id": "w2", "stepsData": [{"date":"2026-04-11 09:01:06 +0200","value":10}]}
+        ]
+      }
+    }"""
+    parsed = apple_hr.parse_apple_hr_json_with_debug(payload)
+    assert parsed["samples"] == [{"timestamp": "2026-04-11T07:01:06Z", "hr": 126}]
+    assert parsed["debug"]["selected_workout_has_heart_rate_data"] is False
+    assert parsed["debug"]["fallback_used"] is True
+    assert parsed["debug"]["resolved_workout_index"] == 0
+
+
+def test_parse_auto_health_export_fallback_prefers_fit_window_overlap():
+    payload = """{
+      "data": {
+        "selectedWorkoutId": "missing",
+        "workouts": [
+          {"id": "w1", "heartRateData": [{"date":"2026-04-11 08:01:06 +0200","Avg":111,"units":"bpm"}]},
+          {"id": "w2", "heartRateData": [{"date":"2026-04-11 09:01:06 +0200","Avg":126,"units":"bpm"}]}
+        ]
+      }
+    }"""
+    parsed = apple_hr.parse_apple_hr_json_with_debug(
+        payload,
+        fit_time_window=("2026-04-11T07:01:00Z", "2026-04-11T07:02:00Z"),
+    )
+    assert parsed["samples"] == [{"timestamp": "2026-04-11T07:01:06Z", "hr": 126}]
+    assert parsed["debug"]["fallback_used"] is True
+    assert parsed["debug"]["resolved_workout_index"] == 1
+
+
 def test_parse_csv_and_normalize_bounds_and_duplicates():
     payload = "timestamp,hr\n2026-04-10T12:00:00Z,150\n2026-04-10T12:00:00Z,151\n2026-04-10T12:00:01Z,20\n"
     rows = apple_hr.parse_apple_hr_csv(payload)

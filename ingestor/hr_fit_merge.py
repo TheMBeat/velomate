@@ -76,16 +76,24 @@ def parse_fit_records_for_merge(file_bytes: bytes) -> dict:
     }
 
 
-def parse_apple_hr_payload(content: bytes, source_type: str = "auto") -> list[dict]:
-    return parse_apple_hr_payload_details(content, source_type=source_type)["samples"]
+def parse_apple_hr_payload(
+    content: bytes,
+    source_type: str = "auto",
+    fit_time_window: tuple[str, str] | None = None,
+) -> list[dict]:
+    return parse_apple_hr_payload_details(content, source_type=source_type, fit_time_window=fit_time_window)["samples"]
 
 
-def parse_apple_hr_payload_details(content: bytes, source_type: str = "auto") -> dict:
+def parse_apple_hr_payload_details(
+    content: bytes,
+    source_type: str = "auto",
+    fit_time_window: tuple[str, str] | None = None,
+) -> dict:
     text = content.decode("utf-8", errors="replace")
     mode = (source_type or "auto").lower()
 
     if mode == "json":
-        parsed = parse_apple_hr_json_with_debug(text)
+        parsed = parse_apple_hr_json_with_debug(text, fit_time_window=fit_time_window)
         parsed["source_type"] = "json"
         return parsed
     if mode == "csv":
@@ -105,7 +113,7 @@ def parse_apple_hr_payload_details(content: bytes, source_type: str = "auto") ->
     if mode == "auto":
         stripped = text.lstrip()
         if stripped.startswith(("{", "[")):
-            parsed = parse_apple_hr_json_with_debug(text)
+            parsed = parse_apple_hr_json_with_debug(text, fit_time_window=fit_time_window)
             parsed["source_type"] = "json"
             return parsed
         samples = parse_apple_hr_csv(text)

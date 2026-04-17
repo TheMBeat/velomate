@@ -47,6 +47,26 @@ def test_parse_apple_hr_payload_details_supports_data_workouts_structure():
     assert parsed["debug"]["extracted_hr_points"] == 1
 
 
+def test_parse_apple_hr_payload_details_uses_fit_window_for_workout_fallback():
+    payload = b"""{
+      "data": {
+        "selectedWorkoutId": "wk_missing",
+        "workouts": [
+          {"id": "wk1", "heartRateData": [{"date":"2026-04-11 06:01:06 +0200","Avg":99,"units":"bpm"}]},
+          {"id": "wk2", "heartRateData": [{"date":"2026-04-11 09:01:06 +0200","Avg":126,"units":"bpm"}]}
+        ]
+      }
+    }"""
+    parsed = hr_fit_merge.parse_apple_hr_payload_details(
+        payload,
+        source_type="json",
+        fit_time_window=("2026-04-11T07:01:00Z", "2026-04-11T07:02:00Z"),
+    )
+    assert parsed["samples"] == [{"timestamp": "2026-04-11T07:01:06Z", "hr": 126}]
+    assert parsed["debug"]["fallback_used"] is True
+    assert parsed["debug"]["resolved_workout_index"] == 1
+
+
 def test_merge_with_overwrite_replaces_existing_hr():
     fit_records = [{"timestamp": "2026-04-11T07:01:05Z", "hr": 140}]
     apple = [{"timestamp": "2026-04-11T07:01:05Z", "hr": 150}]
