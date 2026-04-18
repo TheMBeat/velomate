@@ -164,3 +164,22 @@ def test_debug_rejection_reasons_are_reported():
     assert parsed["debug"]["rejected_entries_count"] == 2
     assert parsed["debug"]["rejection_reasons"]["Invalid timestamp format: bad-date"] == 1
     assert parsed["debug"]["rejection_reasons"]["Invalid HR value: bad"] == 1
+
+
+def test_parse_json_accepts_bom_multiple_wrappers_and_field_aliases():
+    payload = (
+        "\ufeff"
+        '{"workouts":[{"id":"wk-1","start":"2026-04-11 07:00:00 +0000","end":"2026-04-11 08:00:00 +0000",'
+        '"heartRateData":[{"startDate":"2026-04-11T07:00:10Z","bpm":120},{"timestamp":"2026-04-11T07:00:20Z","heartRate":121}]}]}'
+    )
+    parsed = apple_hr.parse_apple_hr_json_with_debug(
+        payload.lstrip("\ufeff"),
+        fit_start=datetime(2026, 4, 11, 7, 0, tzinfo=timezone.utc),
+        fit_end=datetime(2026, 4, 11, 8, 0, tzinfo=timezone.utc),
+    )
+
+    assert parsed["samples"] == [
+        {"timestamp": "2026-04-11T07:00:10Z", "hr": 120},
+        {"timestamp": "2026-04-11T07:00:20Z", "hr": 121},
+    ]
+    assert parsed["debug"]["workouts_found"] == 1

@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 import struct
 from unittest.mock import MagicMock, patch
+import pytest
 
 sys.modules.setdefault("psycopg2", MagicMock())
 sys.modules.setdefault("psycopg2.extras", MagicMock())
@@ -87,6 +88,19 @@ def test_parse_apple_hr_payload_details_csv_tracks_rejections():
     assert parsed["debug"]["rejected_entries_count"] == 2
     assert parsed["debug"]["rejection_reasons"]["Invalid timestamp format: bad-date"] == 1
     assert parsed["debug"]["rejection_reasons"]["Invalid HR value: bad"] == 1
+
+
+def test_parse_apple_hr_payload_details_json_with_bom_and_alias_fields():
+    payload = (
+        b"\xef\xbb\xbf"
+        b'{"samples":[{"startDate":"2026-04-11T07:01:06Z","value":126},{"time":"2026-04-11T07:01:07Z","bpm":127}]}'
+    )
+    parsed = hr_fit_merge.parse_apple_hr_payload_details(payload, source_type="json")
+    assert parsed["samples"] == [
+        {"timestamp": "2026-04-11T07:01:06Z", "hr": 126},
+        {"timestamp": "2026-04-11T07:01:07Z", "hr": 127},
+    ]
+    assert parsed["debug"]["raw_heart_rate_entries_found"] == 2
 
 
 def test_merge_with_overwrite_replaces_existing_hr():
@@ -284,3 +298,51 @@ def test_rewrite_fit_hr_values_skips_non_writable_record_in_fifo_order():
     assert patched == 1
     payload = out_bytes[12:-2]
     assert payload[-1] == 112
+
+
+def test_render_merged_output_fit_raises_on_written_without_binary_patch():
+    ts = hr_fit_merge._utc_iso_to_fit_seconds("2026-04-11T07:01:05Z")
+    definition = bytes([
+        0x40, 0x00, 0x00, 0x14, 0x00, 0x01, 0xFD, 0x04, 0x86,  # timestamp only, no HR field
+    ])
+    data_msg = bytes([0x00]) + struct.pack("<I", ts)
+    data = definition + data_msg
+    header = bytes([12, 0x10, 0x00, 0x00]) + struct.pack("<I", len(data)) + b".FIT"
+    fit_bytes = header + data + struct.pack("<H", hr_fit_merge._fit_crc(data))
+
+    with pytest.raises(hr_fit_merge.FitHrMergeError, match="patched 0 FIT records"):
+        hr_fit_merge.render_merged_output_fit(
+            "ride.fit",
+            fit_bytes,
+            [{"timestamp": "2026-04-11T07:01:05Z", "hr": 155}],
+            {"hr_points_written": 1, "hr_points_matched": 1},
+        )
+
+
+def test_render_merged_output_fit_output_crc_is_valid():
+    ts = hr_fit_merge._utc_iso_to_fit_seconds("2026-04-11T07:01:05Z")
+    definition = bytes([
+        0x40,
+        0x00,
+        0x00,
+        0x14, 0x00,
+        0x02,
+        0xFD, 0x04, 0x86,
+        0x03, 0x01, 0x02,
+    ])
+    data_msg = bytes([0x00]) + struct.pack("<I", ts) + bytes([100])
+    data = definition + data_msg
+    header = bytes([12, 0x10, 0x00, 0x00]) + struct.pack("<I", len(data)) + b".FIT"
+    fit_bytes = header + data + struct.pack("<H", hr_fit_merge._fit_crc(data))
+
+    _filename, out_bytes, report = hr_fit_merge.render_merged_output_fit(
+        "ride.fit",
+        fit_bytes,
+        [{"timestamp": "2026-04-11T07:01:05Z", "hr": 150}],
+        {"hr_points_written": 1, "hr_points_matched": 1},
+    )
+    data_size = int.from_bytes(out_bytes[4:8], "little")
+    data_payload = out_bytes[out_bytes[0]:out_bytes[0] + data_size]
+    crc_in_file = int.from_bytes(out_bytes[out_bytes[0] + data_size:out_bytes[0] + data_size + 2], "little")
+    assert crc_in_file == hr_fit_merge._fit_crc(data_payload)
+    assert report["fit_records_patched_in_binary"] == 1
