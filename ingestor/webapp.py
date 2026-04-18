@@ -9,8 +9,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from fit_import import FitImportError
-from hr_fit_merge import FitHrMergeError, MergeOptions
-from hr_merge_service import parse_merge_options, preview_merge, run_merge
+from hr_fit_merge import (
+    FitHrMergeError,
+    MergeOptions,
+    parse_apple_hr_payload_details,
+    parse_fit_records_for_merge,
+)
+from hr_merge_service import parse_merge_options, run_merge
 from import_service import persist_fit_import, preview_fit_import
 from stores import ExpiringTokenStore
 
@@ -58,7 +63,80 @@ def _handle_fit_preview(filename: str, content: bytes) -> dict:
 
 
 def _handle_hr_merge_preview(fit_filename: str, fit_content: bytes, apple_content: bytes, apple_source_type: str) -> dict:
-    merge_payload, response = preview_merge(fit_filename, fit_content, apple_content, apple_source_type)
+    if not fit_filename.lower().endswith(".fit"):
+        raise FitHrMergeError("FIT input must end with .fit")
+
+    fit_payload = parse_fit_records_for_merge(fit_content)
+    apple_parsed = parse_apple_hr_payload_details(apple_content, source_type=apple_source_type)
+    apple_raw = list(apple_parsed.get("samples", []))
+    raw_debug = dict(apple_parsed.get("debug", {}))
+    fit_start = fit_payload["summary"]["start_time"]
+    fit_end = fit_payload["summary"]["end_time"]
+    overlap_count = sum(1 for row in apple_raw if fit_start <= row.get("timestamp", "") <= fit_end)
+    apple_text = apple_content.decode("utf-8", errors="replace")
+    apple_debug = {
+        "requested_source_type": apple_source_type,
+        "detected_source_type": apple_parsed.get("source_type"),
+        "parser_mode": raw_debug.get("parser_mode"),
+        "top_level_keys": raw_debug.get("top_level_keys", []),
+        "data_keys": raw_debug.get("data_keys", []),
+        "workouts_found": raw_debug.get("workouts_found", 0),
+        "selected_workout_index": raw_debug.get("selected_workout_index"),
+        "selected_workout_id": raw_debug.get("selected_workout_id"),
+        "selected_workout_has_heart_rate_data": raw_debug.get("selected_workout_has_heart_rate_data", False),
+        "selected_workout_heart_rate_point_count": raw_debug.get("selected_workout_heart_rate_point_count", 0),
+        "selected_workout_parseable_point_count": raw_debug.get("selected_workout_parseable_point_count", 0),
+        "fallback_workout_index": raw_debug.get("fallback_workout_index"),
+        "raw_heart_rate_entries_found": raw_debug.get("raw_heart_rate_entries_found", 0),
+        "parsed_heart_rate_entries_count": raw_debug.get("parsed_heart_rate_entries_count", len(apple_raw)),
+        "rejected_entries_count": raw_debug.get("rejected_entries_count", 0),
+        "rejection_reasons": raw_debug.get("rejection_reasons", {}),
+        "sample_preview": apple_raw[:5],
+        "apple_bytes": len(apple_content),
+        "apple_text_preview": apple_text[:200],
+    }
+    print(
+        "[webapp._handle_hr_merge_preview] Apple parse debug: "
+        f"requested_source_type={apple_debug.get('requested_source_type')}, "
+        f"detected_source_type={apple_debug.get('detected_source_type')}, "
+        f"parser_mode={apple_debug.get('parser_mode')}, "
+        f"workouts_found={apple_debug.get('workouts_found')}, "
+        f"selected_workout_index={apple_debug.get('selected_workout_index')}, "
+        f"selected_workout_id={apple_debug.get('selected_workout_id')}, "
+        f"selected_workout_has_heart_rate_data={apple_debug.get('selected_workout_has_heart_rate_data')}, "
+        f"selected_workout_heart_rate_point_count={apple_debug.get('selected_workout_heart_rate_point_count')}, "
+        f"selected_workout_parseable_point_count={apple_debug.get('selected_workout_parseable_point_count')}, "
+        f"fallback_workout_index={apple_debug.get('fallback_workout_index')}, "
+        f"raw_heart_rate_entries_found={apple_debug.get('raw_heart_rate_entries_found')}, "
+        f"parsed_heart_rate_entries_count={apple_debug.get('parsed_heart_rate_entries_count')}, "
+        f"rejected_entries_count={apple_debug.get('rejected_entries_count')}, "
+        f"apple_bytes={apple_debug.get('apple_bytes')}, "
+        f"extracted_hr_points={len(apple_raw)}, overlap_points={overlap_count}"
+    )
+    warnings = []
+    if not apple_raw:
+        warnings.append("No Apple HR points could be parsed from the uploaded file; inspect apple_debug for parser/input details.")
+    elif overlap_count == 0:
+        warnings.append("Apple HR points were parsed but none overlap the FIT timeline; verify timezone/export range.")
+    merge_payload = {
+        "fit_filename": fit_filename,
+        "fit_bytes": fit_content,
+        "fit_records": fit_payload["records"],
+        "apple_raw": apple_raw,
+        "apple_debug": apple_debug,
+    }
+    response = {
+        "fit_summary": fit_payload["summary"],
+        "apple_debug": apple_debug,
+        "apple_summary": {
+            "point_count": len(apple_raw),
+            "first_timestamp": apple_raw[0]["timestamp"] if apple_raw else None,
+            "last_timestamp": apple_raw[-1]["timestamp"] if apple_raw else None,
+            "debug": apple_debug,
+        },
+        "estimated_overlap_points": overlap_count,
+        "warnings": warnings,
+    }
     token = _store_pending(merge_payload)
     return {"import_token": token, **response}
 
@@ -152,6 +230,7 @@ def _render_hr_merge_page() -> str:
             return;
           }
           const compact = {
+            requested_source_type: appleDebug.requested_source_type ?? null,
             detected_source_type: appleDebug.detected_source_type ?? null,
             parser_mode: appleDebug.parser_mode ?? null,
             top_level_keys: appleDebug.top_level_keys ?? [],
@@ -167,7 +246,9 @@ def _render_hr_merge_page() -> str:
             parsed_heart_rate_entries_count: appleDebug.parsed_heart_rate_entries_count ?? 0,
             rejected_entries_count: appleDebug.rejected_entries_count ?? 0,
             rejection_reasons: appleDebug.rejection_reasons ?? {},
-            sample_preview: appleDebug.sample_preview ?? []
+            sample_preview: appleDebug.sample_preview ?? [],
+            apple_bytes: appleDebug.apple_bytes ?? null,
+            apple_text_preview: appleDebug.apple_text_preview ?? null
           };
           appleDebugOutput.textContent = JSON.stringify(compact, null, 2);
           appleDebugPanel.open = true;
