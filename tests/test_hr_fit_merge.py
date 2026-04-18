@@ -5,8 +5,6 @@ import sys
 import struct
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 sys.modules.setdefault("psycopg2", MagicMock())
 sys.modules.setdefault("psycopg2.extras", MagicMock())
 
@@ -104,17 +102,6 @@ def test_merge_with_overwrite_replaces_existing_hr():
     assert report["hr_points_written"] == 1
 
 
-def test_merge_rejects_unknown_matching_strategy():
-    fit_records = [{"timestamp": "2026-04-11T07:01:05Z", "hr": None}]
-    apple = [{"timestamp": "2026-04-11T07:01:05Z", "hr": 150}]
-    with pytest.raises(hr_fit_merge.FitHrMergeError):
-        hr_fit_merge.merge_fit_with_hr(
-            fit_records,
-            apple,
-            hr_fit_merge.MergeOptions(matching_strategy="bad-strategy"),
-        )
-
-
 def test_interpolate_hr_no_extrapolation_and_no_zero_fill():
     out = hr_fit_merge.interpolate_hr(
         [
@@ -131,6 +118,16 @@ def test_interpolate_hr_no_extrapolation_and_no_zero_fill():
     )
     assert out == [None, 150, 152, 154, None]
     assert 0 not in [v for v in out if v is not None]
+
+
+def test_render_merged_output_json_serializes_payload():
+    content = hr_fit_merge.render_merged_output_json(
+        "ride.fit",
+        [{"timestamp": "2026-04-11T07:01:05Z", "hr": 150}],
+        {"hr_points_written": 1},
+    )
+    assert b'"source_fit": "ride.fit"' in content
+    assert b'"hr_points_written": 1' in content
 
 
 def test_parse_fit_records_for_merge_uses_utc_and_hr_optional():

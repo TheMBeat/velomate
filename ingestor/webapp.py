@@ -219,7 +219,6 @@ def _render_hr_merge_page() -> str:
         <form id='runForm'>
           <input type='hidden' name='import_token' />
           <div class='grid'>
-            <div><label>Tolerance (seconds)</label><br/><input type='number' name='tolerance_seconds' value='2' min='0' max='30'/></div>
             <div><label>Overwrite existing FIT HR</label><br/><select name='overwrite_existing_hr'><option value='false'>No</option><option value='true'>Yes</option></select></div>
             <div><label>Ignore implausible HR</label><br/><select name='ignore_implausible_hr'><option value='true'>Yes</option><option value='false'>No</option></select></div>
             <div><label>HR min / max</label><br/><input type='number' name='min_hr' value='30' min='1' max='240'/> <input type='number' name='max_hr' value='240' min='60' max='260'/></div>
@@ -287,7 +286,6 @@ def _render_hr_merge_page() -> str:
           const form = new FormData(e.target);
           const payload = {
             import_token: form.get('import_token') || importToken,
-            tolerance_seconds: Number(form.get('tolerance_seconds') || 2),
             overwrite_existing_hr: form.get('overwrite_existing_hr') === 'true',
             ignore_implausible_hr: form.get('ignore_implausible_hr') !== 'false',
             min_hr: Number(form.get('min_hr') || 30),

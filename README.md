@@ -212,7 +212,7 @@ Current MVP limitations:
 A lightweight web utility is available at `http://localhost:8080/tools/fit-hr-merge` to:
 - upload one FIT file + one Apple HR export file (JSON/CSV/auto-detect)
 - preview timeline overlap and dataset summaries
-- run nearest-neighbor HR mapping with tolerance + overwrite controls
+- run interpolation-based HR mapping onto FIT timestamps with overwrite controls
 - download merged output artifact + coverage report
 
 Merge output is generated as a new FIT file (`*_merged_hr.fit`) plus merge stats in the API response/UI preview.

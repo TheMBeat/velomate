@@ -37,12 +37,10 @@ def parse_bool_flag(value, *, default: bool) -> bool:
 
 def parse_merge_options(payload: dict) -> MergeOptions:
     return MergeOptions(
-        tolerance_seconds=int(payload.get("tolerance_seconds", 2)),
         overwrite_existing_hr=parse_bool_flag(payload.get("overwrite_existing_hr", False), default=False),
         ignore_implausible_hr=parse_bool_flag(payload.get("ignore_implausible_hr", True), default=True),
         min_hr=int(payload.get("min_hr", 30)),
         max_hr=int(payload.get("max_hr", 240)),
-        matching_strategy=str(payload.get("matching_strategy", "linear")),
     )
 
 

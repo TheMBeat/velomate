@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from collections import defaultdict, deque
 from io import BytesIO
+import json
 import struct
 
 from apple_hr import AppleHrParseError, normalize_hr_series, parse_apple_hr_text_details
@@ -19,12 +20,10 @@ class FitHrMergeError(ValueError):
 
 @dataclass(frozen=True)
 class MergeOptions:
-    tolerance_seconds: int = 2
     overwrite_existing_hr: bool = False
     ignore_implausible_hr: bool = True
     min_hr: int = 30
     max_hr: int = 240
-    matching_strategy: str = "linear"
 
 
 FIT_EPOCH = datetime(1989, 12, 31, tzinfo=timezone.utc)
@@ -165,8 +164,6 @@ def merge_fit_with_hr(fit_records: list[dict], hr_series: list[dict], options: M
     )
     if not fit_records:
         raise FitHrMergeError("FIT record set is empty")
-    if options.matching_strategy not in {"linear", "nearest"}:
-        raise FitHrMergeError(f"Unsupported matching strategy: {options.matching_strategy}")
     fit_timestamps = [r["timestamp"] for r in fit_records]
     interpolated = interpolate_hr(normalized, fit_timestamps)
 

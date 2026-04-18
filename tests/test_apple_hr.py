@@ -92,6 +92,63 @@ def test_fallback_selection_uses_most_parseable_points_when_no_overlap():
     assert parsed["debug"]["selected_workout_id"] == "w2"
 
 
+def test_overlap_winner_with_zero_parseable_points_falls_back_to_parseable_workout():
+    payload = """{
+      "data": {
+        "workouts": [
+          {
+            "id": "w_overlap_bad",
+            "start": "2026-04-11 07:00:00 +0000",
+            "end": "2026-04-11 08:00:00 +0000",
+            "heartRateData": [{"date":"bad-date","Avg":150}]
+          },
+          {
+            "id": "w_parseable",
+            "start": "2026-04-11 05:00:00 +0000",
+            "end": "2026-04-11 06:00:00 +0000",
+            "heartRateData": [{"date":"2026-04-11 05:10:00 +0000","Avg":132}]
+          }
+        ]
+      }
+    }"""
+    parsed = apple_hr.parse_apple_hr_json_with_debug(
+        payload,
+        fit_start=datetime(2026, 4, 11, 7, 10, tzinfo=timezone.utc),
+        fit_end=datetime(2026, 4, 11, 7, 40, tzinfo=timezone.utc),
+    )
+    assert parsed["samples"] == [{"timestamp": "2026-04-11T05:10:00Z", "hr": 132}]
+    assert parsed["debug"]["selected_workout_id"] == "w_overlap_bad"
+    assert parsed["debug"]["selected_workout_parseable_point_count"] == 0
+    assert parsed["debug"]["fallback_workout_id"] == "w_parseable"
+
+
+def test_no_parseable_workouts_returns_empty_samples():
+    payload = """{
+      "data": {
+        "workouts": [
+          {
+            "id": "w1",
+            "start": "2026-04-11 07:00:00 +0000",
+            "end": "2026-04-11 08:00:00 +0000",
+            "heartRateData": [{"date":"bad-date","Avg":126}]
+          },
+          {
+            "id": "w2",
+            "start": "2026-04-11 07:00:00 +0000",
+            "end": "2026-04-11 08:00:00 +0000",
+            "heartRateData": [{"date":"still-bad","Avg":"bad"}]
+          }
+        ]
+      }
+    }"""
+    parsed = apple_hr.parse_apple_hr_json_with_debug(
+        payload,
+        fit_start=datetime(2026, 4, 11, 7, 10, tzinfo=timezone.utc),
+        fit_end=datetime(2026, 4, 11, 7, 40, tzinfo=timezone.utc),
+    )
+    assert parsed["samples"] == []
+
+
 def test_debug_rejection_reasons_are_reported():
     payload = """{
       "heartRateData": [

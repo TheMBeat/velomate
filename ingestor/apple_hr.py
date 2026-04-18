@@ -188,6 +188,26 @@ def _select_workout_by_parseable_points(workouts: list[dict[str, Any]]) -> int |
     return best_index
 
 
+def _set_selected_workout_debug(debug: dict[str, Any], workouts: list[dict[str, Any]], index: int | None) -> int:
+    if index is None or index < 0 or index >= len(workouts):
+        debug["selected_workout_index"] = None
+        debug["selected_workout_id"] = None
+        debug["selected_workout_has_heart_rate_data"] = False
+        debug["selected_workout_heart_rate_point_count"] = 0
+        debug["selected_workout_parseable_point_count"] = 0
+        return 0
+
+    selected = workouts[index]
+    hr_data = selected.get("heartRateData")
+    parseable_count = _parseable_hr_point_count(hr_data)
+    debug["selected_workout_index"] = index
+    debug["selected_workout_id"] = _workout_identifier(selected)
+    debug["selected_workout_has_heart_rate_data"] = isinstance(hr_data, list) and len(hr_data) > 0
+    debug["selected_workout_heart_rate_point_count"] = len(hr_data) if isinstance(hr_data, list) else 0
+    debug["selected_workout_parseable_point_count"] = parseable_count
+    return parseable_count
+
+
 def _discover_workouts(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
     for key in WORKOUT_WRAPPER_KEYS:
         wrapper = payload.get(key) if key != "data" else payload.get("data")
@@ -225,28 +245,28 @@ def _iter_json_candidates(
             debug["data_keys"] = sorted(payload["data"].keys())
         debug["workouts_found"] = len(workouts)
 
-        selected_idx, best_overlap = _select_workout_by_overlap(workouts, fit_start, fit_end)
-        if selected_idx is not None and best_overlap and best_overlap > 0:
-            selected = workouts[selected_idx]
-            hr_data = selected.get("heartRateData")
-            debug["selected_workout_index"] = selected_idx
-            debug["selected_workout_id"] = _workout_identifier(selected)
-            debug["selected_workout_has_heart_rate_data"] = isinstance(hr_data, list) and len(hr_data) > 0
-            debug["selected_workout_heart_rate_point_count"] = len(hr_data) if isinstance(hr_data, list) else 0
-            debug["selected_workout_parseable_point_count"] = _parseable_hr_point_count(hr_data)
-            return hr_data if isinstance(hr_data, list) else [], debug
+        overlap_idx, overlap_seconds = _select_workout_by_overlap(workouts, fit_start, fit_end)
+        has_overlap_selection = overlap_idx is not None and overlap_seconds is not None and overlap_seconds > 0
+
+        if has_overlap_selection:
+            overlap_parseable_count = _set_selected_workout_debug(debug, workouts, overlap_idx)
+            if overlap_parseable_count > 0:
+                selected = workouts[overlap_idx]
+                hr_data = selected.get("heartRateData")
+                return hr_data if isinstance(hr_data, list) else [], debug
 
         fallback_idx = _select_workout_by_parseable_points(workouts)
         if fallback_idx is not None:
+            if has_overlap_selection:
+                debug["fallback_workout_index"] = fallback_idx
+                debug["fallback_workout_id"] = _workout_identifier(workouts[fallback_idx])
+            else:
+                _set_selected_workout_debug(debug, workouts, fallback_idx)
+                debug["fallback_workout_index"] = fallback_idx
+                debug["fallback_workout_id"] = _workout_identifier(workouts[fallback_idx])
+
             selected = workouts[fallback_idx]
             hr_data = selected.get("heartRateData")
-            debug["selected_workout_index"] = fallback_idx
-            debug["selected_workout_id"] = _workout_identifier(selected)
-            debug["selected_workout_has_heart_rate_data"] = isinstance(hr_data, list) and len(hr_data) > 0
-            debug["selected_workout_heart_rate_point_count"] = len(hr_data) if isinstance(hr_data, list) else 0
-            debug["selected_workout_parseable_point_count"] = _parseable_hr_point_count(hr_data)
-            debug["fallback_workout_index"] = fallback_idx
-            debug["fallback_workout_id"] = _workout_identifier(selected)
             return hr_data if isinstance(hr_data, list) else [], debug
         return [], debug
 
