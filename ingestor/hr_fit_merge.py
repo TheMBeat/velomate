@@ -84,7 +84,7 @@ def parse_apple_hr_payload_details(
     fit_start_time: str | None = None,
     fit_end_time: str | None = None,
 ) -> dict:
-    text = content.decode("utf-8", errors="replace")
+    text = content.decode("utf-8-sig", errors="replace")
     fit_start = datetime.fromisoformat(fit_start_time.replace("Z", "+00:00")) if fit_start_time else None
     fit_end = datetime.fromisoformat(fit_end_time.replace("Z", "+00:00")) if fit_end_time else None
     try:
@@ -212,6 +212,24 @@ def _fit_crc(data: bytes) -> int:
             else:
                 crc >>= 1
     return crc & 0xFFFF
+
+
+def _validate_fit_crc(fit_bytes: bytes) -> None:
+    if len(fit_bytes) < 14:
+        raise FitHrMergeError("Invalid FIT file")
+    header_size = fit_bytes[0]
+    if header_size < 12:
+        raise FitHrMergeError("Invalid FIT header")
+    data_size = int.from_bytes(fit_bytes[4:8], "little")
+    data_start = header_size
+    data_end = data_start + data_size
+    if data_end + 2 > len(fit_bytes):
+        raise FitHrMergeError("Corrupt FIT data size")
+
+    expected_crc = int.from_bytes(fit_bytes[data_end:data_end + 2], "little")
+    actual_crc = _fit_crc(fit_bytes[data_start:data_end])
+    if actual_crc != expected_crc:
+        raise FitHrMergeError("Invalid file CRC after merge")
 
 
 def _decode_timestamp(field_bytes: bytes, little_endian: bool) -> int:
@@ -368,8 +386,16 @@ def rewrite_fit_hr_values(original_fit: bytes, merged_records: list[dict]) -> tu
 
 def render_merged_output_fit(original_fit_name: str, original_fit_bytes: bytes, merged_records: list[dict], report: dict) -> tuple[str, bytes, dict]:
     merged_bytes, patched = rewrite_fit_hr_values(original_fit_bytes, merged_records)
+    _validate_fit_crc(merged_bytes)
     enriched = dict(report)
     enriched["fit_records_patched_in_binary"] = patched
+    if enriched.get("hr_points_written", 0) > 0 and patched == 0:
+        raise FitHrMergeError(
+            "Merge wrote HR values in memory but patched 0 FIT records in binary. "
+            "Input FIT likely has no writable heart_rate field in record messages."
+        )
+    if patched > enriched.get("hr_points_written", 0):
+        raise FitHrMergeError("Binary patched count exceeds planned HR writes")
     filename = original_fit_name.rsplit(".", 1)[0] + "_merged_hr.fit"
     return filename, merged_bytes, enriched
 

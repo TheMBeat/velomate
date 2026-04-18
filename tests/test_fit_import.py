@@ -19,6 +19,7 @@ if str(_ingestor_dir) not in sys.path:
 
 import fit_import
 import webapp
+import hr_fit_merge
 
 
 class _Field:
@@ -226,3 +227,47 @@ def test_run_hr_merge_includes_apple_debug_in_response():
     assert result["apple_debug"]["detected_source_type"] == "json"
     assert result["apple_debug"]["parser_mode"] == "json"
     assert result["apple_debug"]["sample_preview"][0]["hr"] == 120
+
+
+def test_hr_merge_preview_with_json_yields_points_and_overlap():
+    fit_summary = {
+        "start_time": "2026-04-11T07:00:00Z",
+        "end_time": "2026-04-11T08:00:00Z",
+        "sample_count": 4,
+        "has_existing_hr": False,
+    }
+    with patch(
+        "webapp.parse_fit_records_for_merge",
+        return_value={"records": [{"timestamp": "2026-04-11T07:00:10Z", "hr": None}], "summary": fit_summary},
+    ):
+        result = webapp._handle_hr_merge_preview(
+            "ride.fit",
+            b"fit-bytes",
+            b"\xef\xbb\xbf" + b'{"samples":[{"startDate":"2026-04-11T07:00:10Z","value":120},{"time":"2026-04-11T07:00:20Z","bpm":121}]}',
+            "json",
+        )
+
+    assert result["apple_summary"]["point_count"] == 2
+    assert result["estimated_overlap_points"] == 2
+    assert result["apple_debug"]["detected_source_type"] == "json"
+    assert result["apple_debug"]["parser_mode"] is not None
+    assert result["apple_debug"]["raw_heart_rate_entries_found"] == 2
+
+
+def test_api_merge_run_returns_400_when_binary_patch_fails_after_write():
+    handler = webapp._Handler.__new__(webapp._Handler)
+    handler.path = "/api/tools/fit-hr-merge/run"
+    payload = b'{"import_token":"t"}'
+    handler.headers = {"Content-Length": str(len(payload))}
+    handler.rfile = io.BytesIO(payload)
+    handler.wfile = io.BytesIO()
+    handler.command = "POST"
+    handler.request_version = "HTTP/1.1"
+
+    with (
+        patch.object(handler, "_json") as send_json,
+        patch("webapp._run_hr_merge", side_effect=hr_fit_merge.FitHrMergeError("patched 0 FIT records")),
+    ):
+        handler.do_POST()
+
+    send_json.assert_called_once_with(400, {"error": "patched 0 FIT records"})

@@ -75,10 +75,18 @@ def _sample_from_obj(obj: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(obj, dict):
         return None
 
-    ts_raw = obj.get("timestamp") or obj.get("date") or obj.get("time")
+    ts_raw = obj.get("timestamp") or obj.get("date") or obj.get("time") or obj.get("startDate")
     hr_raw = obj.get("hr")
     if hr_raw is None:
         hr_raw = obj.get("Avg")
+    if hr_raw is None:
+        hr_raw = obj.get("value")
+    if hr_raw is None:
+        hr_raw = obj.get("bpm")
+    if hr_raw is None:
+        hr_raw = obj.get("heartRate")
+    if isinstance(hr_raw, dict):
+        hr_raw = hr_raw.get("value", hr_raw.get("bpm"))
 
     if ts_raw in (None, "") or hr_raw in (None, ""):
         return None
@@ -227,7 +235,9 @@ def _iter_json_candidates(
     fit_end: datetime | None,
 ) -> tuple[list[Any], dict[str, Any]]:
     if isinstance(payload, list):
-        return payload, _empty_debug("json_list")
+        debug = _empty_debug("json_list")
+        debug["top_level_keys"] = []
+        return payload, debug
     if not isinstance(payload, dict):
         return [], _empty_debug()
 
@@ -275,6 +285,8 @@ def _iter_json_candidates(
         if isinstance(value, list):
             debug = _empty_debug(f"wrapper_list:{key}")
             debug["top_level_keys"] = sorted(payload.keys())
+            if key == "data":
+                debug["data_keys"] = sorted(payload.keys())
             return value, debug
 
     return [], _empty_debug()
