@@ -21,13 +21,22 @@ def test_merge_without_overwrite_preserves_existing_hr():
     fit_records = [
         {"timestamp": "2026-04-11T07:01:05Z", "hr": 140},
         {"timestamp": "2026-04-11T07:01:06Z", "hr": None},
+        {"timestamp": "2026-04-11T07:01:07Z", "hr": None},
     ]
-    apple = [{"timestamp": "2026-04-11T07:01:05Z", "hr": 150}, {"timestamp": "2026-04-11T07:01:06Z", "hr": 151}]
-    merged, report = hr_fit_merge.merge_fit_with_hr(fit_records, apple, hr_fit_merge.MergeOptions(overwrite_existing_hr=False))
+    apple = [
+        {"timestamp": "2026-04-11T07:01:05Z", "hr": 150},
+        {"timestamp": "2026-04-11T07:01:07Z", "hr": 154},
+    ]
+    merged, report = hr_fit_merge.merge_fit_with_hr(
+        fit_records,
+        apple,
+        hr_fit_merge.MergeOptions(overwrite_existing_hr=False),
+    )
 
     assert merged[0]["hr"] == 140
-    assert merged[1]["hr"] == 151
-    assert report["hr_points_written"] == 1
+    assert merged[1]["hr"] == 152
+    assert merged[2]["hr"] == 154
+    assert report["hr_points_written"] == 2
 
 
 def test_parse_apple_hr_payload_details_supports_data_workouts_structure():
@@ -35,12 +44,27 @@ def test_parse_apple_hr_payload_details_supports_data_workouts_structure():
       "data": {
         "selectedWorkoutId": "wk2",
         "workouts": [
-          {"id": "wk1", "heartRateData": [{"date":"2026-04-11 09:00:00 +0200","Avg":111,"units":"bpm"}]},
-          {"id": "wk2", "heartRateData": [{"date":"2026-04-11 09:01:06 +0200","Avg":126,"units":"bpm"}]}
+          {
+            "id": "wk1",
+            "start": "2026-04-11 05:00:00 +0000",
+            "end": "2026-04-11 06:00:00 +0000",
+            "heartRateData": [{"date":"2026-04-11 09:00:00 +0200","Avg":111,"units":"bpm"}]
+          },
+          {
+            "id": "wk2",
+            "start": "2026-04-11 07:00:00 +0000",
+            "end": "2026-04-11 08:00:00 +0000",
+            "heartRateData": [{"date":"2026-04-11 09:01:06 +0200","Avg":126,"units":"bpm"}]
+          }
         ]
       }
     }"""
-    parsed = hr_fit_merge.parse_apple_hr_payload_details(payload, source_type="json")
+    parsed = hr_fit_merge.parse_apple_hr_payload_details(
+        payload,
+        source_type="json",
+        fit_start_time="2026-04-11T07:00:00Z",
+        fit_end_time="2026-04-11T08:00:00Z",
+    )
     assert parsed["samples"] == [{"timestamp": "2026-04-11T07:01:06Z", "hr": 126}]
     assert parsed["debug"]["workouts_found"] == 2
     assert parsed["debug"]["selected_workout_has_heart_rate_data"] is True
@@ -70,7 +94,11 @@ def test_parse_apple_hr_payload_details_csv_tracks_rejections():
 def test_merge_with_overwrite_replaces_existing_hr():
     fit_records = [{"timestamp": "2026-04-11T07:01:05Z", "hr": 140}]
     apple = [{"timestamp": "2026-04-11T07:01:05Z", "hr": 150}]
-    merged, report = hr_fit_merge.merge_fit_with_hr(fit_records, apple, hr_fit_merge.MergeOptions(overwrite_existing_hr=True, tolerance_seconds=2))
+    merged, report = hr_fit_merge.merge_fit_with_hr(
+        fit_records,
+        apple,
+        hr_fit_merge.MergeOptions(overwrite_existing_hr=True),
+    )
 
     assert merged[0]["hr"] == 150
     assert report["hr_points_written"] == 1
@@ -83,8 +111,26 @@ def test_merge_rejects_unknown_matching_strategy():
         hr_fit_merge.merge_fit_with_hr(
             fit_records,
             apple,
-            hr_fit_merge.MergeOptions(matching_strategy="interpolate"),
+            hr_fit_merge.MergeOptions(matching_strategy="bad-strategy"),
         )
+
+
+def test_interpolate_hr_no_extrapolation_and_no_zero_fill():
+    out = hr_fit_merge.interpolate_hr(
+        [
+            {"timestamp": "2026-04-11T07:01:05Z", "hr": 150},
+            {"timestamp": "2026-04-11T07:01:07Z", "hr": 154},
+        ],
+        [
+            "2026-04-11T07:01:04Z",
+            "2026-04-11T07:01:05Z",
+            "2026-04-11T07:01:06Z",
+            "2026-04-11T07:01:07Z",
+            "2026-04-11T07:01:08Z",
+        ],
+    )
+    assert out == [None, 150, 152, 154, None]
+    assert 0 not in [v for v in out if v is not None]
 
 
 def test_parse_fit_records_for_merge_uses_utc_and_hr_optional():
