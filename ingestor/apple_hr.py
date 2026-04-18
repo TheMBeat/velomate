@@ -1,8 +1,4 @@
-"""Apple Health HR export parsing + normalization helpers.
-
-This module intentionally keeps parsing detached from merge/import logic so it can
-be reused by future CLI and web flows.
-"""
+"""Apple Health HR export parsing + normalization helpers."""
 
 from __future__ import annotations
 
@@ -17,11 +13,9 @@ class AppleHrParseError(ValueError):
     """Raised when Apple HR export payload cannot be parsed."""
 
 
-WORKOUT_WRAPPER_KEYS = ("samples", "items", "heart_rate", "heartRateData")
+WORKOUT_WRAPPER_KEYS = ("data", "samples", "items", "heart_rate", "heartRateData")
 DIRECT_LIST_WRAPPER_KEYS = ("heartRateData", "heart_rate", "samples", "data", "items")
 WORKOUT_ID_KEYS = ("id", "uuid", "workoutId", "workoutUUID")
-WORKOUT_SELECTOR_KEYS = ("selectedWorkoutId", "selectedWorkoutUUID", "workoutId", "workoutUUID")
-WORKOUT_INDEX_KEYS = ("selectedWorkoutIndex",)
 
 
 def _empty_debug(parser_mode: str = "generic") -> dict[str, Any]:
@@ -83,8 +77,6 @@ def _sample_from_obj(obj: dict[str, Any]) -> dict[str, Any] | None:
 
     ts_raw = obj.get("timestamp") or obj.get("date") or obj.get("time")
     hr_raw = obj.get("hr")
-
-    # Auto Health Export workout JSON uses Avg/Min/Max for heartRateData entries.
     if hr_raw is None:
         hr_raw = obj.get("Avg")
 
@@ -97,11 +89,6 @@ def _sample_from_obj(obj: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def _rejection_reason(exc: Exception) -> str:
-    message = str(exc).strip()
-    return message or exc.__class__.__name__
-
-
 def _parse_samples(candidates: list[Any]) -> tuple[list[dict[str, Any]], int, dict[str, int]]:
     samples: list[dict[str, Any]] = []
     rejection_reasons: dict[str, int] = {}
@@ -112,45 +99,18 @@ def _parse_samples(candidates: list[Any]) -> tuple[list[dict[str, Any]], int, di
             sample = _sample_from_obj(obj)
         except AppleHrParseError as exc:
             rejected += 1
-            reason = _rejection_reason(exc)
+            reason = str(exc).strip() or exc.__class__.__name__
             rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
             continue
 
-        if sample is not None:
-            samples.append(sample)
-        else:
+        if sample is None:
             rejected += 1
             reason = "Missing timestamp or HR value"
             rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
+            continue
+        samples.append(sample)
 
     return samples, rejected, rejection_reasons
-
-
-def _parseable_hr_point_count(hr_data: Any) -> int:
-    if not isinstance(hr_data, list):
-        return 0
-    parsed, _, _ = _parse_samples(hr_data)
-    return len(parsed)
-
-
-def _normalize_selector_value(value: Any) -> str | None:
-    if value in (None, ""):
-        return None
-    if isinstance(value, (dict, list, set, tuple)):
-        return None
-    return str(value).strip()
-
-
-def _normalize_selected_index(value: Any) -> int | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        stripped = value.strip()
-        if stripped.isdigit():
-            return int(stripped)
-    return None
 
 
 def _workout_identifier(workout: dict[str, Any]) -> Any:
@@ -161,157 +121,115 @@ def _workout_identifier(workout: dict[str, Any]) -> Any:
     return None
 
 
-def _merge_wrapper_with_top_level_selectors(
-    wrapper: dict[str, Any] | None,
-    payload: dict[str, Any] | None,
-) -> dict[str, Any] | None:
-    if not isinstance(wrapper, dict):
-        return None
-
-    merged = dict(wrapper)
-
-    if isinstance(payload, dict):
-        for key in (*WORKOUT_INDEX_KEYS, *WORKOUT_SELECTOR_KEYS):
-            if key in payload and key not in merged:
-                merged[key] = payload[key]
-
-    return merged
+def _parse_workout_bounds(workout: dict[str, Any]) -> tuple[datetime | None, datetime | None]:
+    start_raw = workout.get("start")
+    end_raw = workout.get("end")
+    if start_raw in (None, "") or end_raw in (None, ""):
+        return None, None
+    try:
+        return _parse_timestamp(str(start_raw)), _parse_timestamp(str(end_raw))
+    except AppleHrParseError:
+        return None, None
 
 
-def _find_matching_workout_index(workouts: list[dict[str, Any]], wrapper: dict[str, Any]) -> tuple[int | None, bool]:
-    if not workouts:
-        return None, False
-
-    selected_index: Any = None
-    for key in WORKOUT_INDEX_KEYS:
-        if key in wrapper:
-            selected_index = wrapper.get(key)
-            break
-
-    normalized_index = _normalize_selected_index(selected_index)
-    if normalized_index is not None:
-        if 0 <= normalized_index < len(workouts):
-            return normalized_index, True
-        return None, False
-
-    selected_workout_id: Any = None
-    selected_specified = False
-    for key in WORKOUT_SELECTOR_KEYS:
-        if key in wrapper:
-            selected_workout_id = wrapper.get(key)
-            selected_specified = True
-            break
-
-    normalized_selected = _normalize_selector_value(selected_workout_id)
-    if selected_specified:
-        if normalized_selected is None:
-            return None, False
-
-        for idx, workout in enumerate(workouts):
-            if not isinstance(workout, dict):
-                continue
-            for workout_key in WORKOUT_ID_KEYS:
-                normalized_candidate = _normalize_selector_value(workout.get(workout_key))
-                if normalized_candidate is not None and normalized_selected == normalized_candidate:
-                    return idx, True
-        return None, False
-
-    return None, False
+def _parseable_hr_point_count(hr_data: Any) -> int:
+    if not isinstance(hr_data, list):
+        return 0
+    parsed, _, _ = _parse_samples(hr_data)
+    return len(parsed)
 
 
-def _first_workout_with_points(workouts: list[dict[str, Any]], skip_index: int | None = None) -> int | None:
+def _compute_overlap_seconds(
+    workout_start: datetime,
+    workout_end: datetime,
+    fit_start: datetime,
+    fit_end: datetime,
+) -> float:
+    overlap_start = max(workout_start, fit_start)
+    overlap_end = min(workout_end, fit_end)
+    return max(0.0, (overlap_end - overlap_start).total_seconds())
+
+
+def _select_workout_by_overlap(
+    workouts: list[dict[str, Any]],
+    fit_start: datetime | None,
+    fit_end: datetime | None,
+) -> tuple[int | None, float | None]:
+    if fit_start is None or fit_end is None:
+        return None, None
+
+    best_index = None
+    best_overlap = -1.0
+    computed_any = False
+
     for idx, workout in enumerate(workouts):
-        if skip_index is not None and idx == skip_index:
+        w_start, w_end = _parse_workout_bounds(workout)
+        if w_start is None or w_end is None:
             continue
-        if not isinstance(workout, dict):
-            continue
-        if _parseable_hr_point_count(workout.get("heartRateData")) > 0:
-            return idx
-    return None
+        computed_any = True
+        overlap = _compute_overlap_seconds(w_start, w_end, fit_start, fit_end)
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_index = idx
+
+    if not computed_any:
+        return None, None
+    return best_index, best_overlap
 
 
-def _first_workout_with_raw_entries(workouts: list[dict[str, Any]], skip_index: int | None = None) -> int | None:
+def _select_workout_by_parseable_points(workouts: list[dict[str, Any]]) -> int | None:
+    best_index = None
+    best_count = 0
     for idx, workout in enumerate(workouts):
-        if skip_index is not None and idx == skip_index:
-            continue
-        if not isinstance(workout, dict):
-            continue
-        hr_data = workout.get("heartRateData")
-        if isinstance(hr_data, list) and len(hr_data) > 0:
-            return idx
-    return None
+        count = _parseable_hr_point_count(workout.get("heartRateData"))
+        if count > best_count:
+            best_count = count
+            best_index = idx
+    return best_index
 
 
-def _discover_workout_candidates(wrapper: Any, parser_mode: str) -> tuple[list[Any], dict[str, Any]] | None:
-    if not isinstance(wrapper, dict):
-        return None
+def _set_selected_workout_debug(debug: dict[str, Any], workouts: list[dict[str, Any]], index: int | None) -> int:
+    if index is None or index < 0 or index >= len(workouts):
+        debug["selected_workout_index"] = None
+        debug["selected_workout_id"] = None
+        debug["selected_workout_has_heart_rate_data"] = False
+        debug["selected_workout_heart_rate_point_count"] = 0
+        debug["selected_workout_parseable_point_count"] = 0
+        return 0
 
-    workouts_raw = wrapper.get("workouts")
-    if not isinstance(workouts_raw, list):
-        return None
-
-    workouts = [w for w in workouts_raw if isinstance(w, dict)]
-    debug = _empty_debug(parser_mode)
-    debug["workouts_found"] = len(workouts)
-
-    selected_idx, selected_explicit = _find_matching_workout_index(workouts, wrapper)
-    debug["selected_workout_index"] = selected_idx
-
-    if selected_idx is not None:
-        selected_workout = workouts[selected_idx]
-        hr_data = selected_workout.get("heartRateData")
-        parseable_count = _parseable_hr_point_count(hr_data)
-
-        debug["selected_workout_id"] = _workout_identifier(selected_workout)
-        debug["selected_workout_heart_rate_point_count"] = len(hr_data) if isinstance(hr_data, list) else 0
-        debug["selected_workout_parseable_point_count"] = parseable_count
-        debug["selected_workout_has_heart_rate_data"] = isinstance(hr_data, list) and len(hr_data) > 0
-
-        if parseable_count > 0:
-            return hr_data, debug
-
-        fallback_idx = _first_workout_with_points(workouts, skip_index=selected_idx)
-        if fallback_idx is not None:
-            debug["fallback_workout_index"] = fallback_idx
-            debug["fallback_workout_id"] = _workout_identifier(workouts[fallback_idx])
-            return workouts[fallback_idx]["heartRateData"], debug
-
-        if isinstance(hr_data, list) and len(hr_data) > 0:
-            return hr_data, debug
-
-    if not selected_explicit:
-        fallback_idx = _first_workout_with_points(workouts)
-        if fallback_idx is not None:
-            hr_data = workouts[fallback_idx].get("heartRateData")
-            debug["selected_workout_index"] = fallback_idx
-            debug["selected_workout_id"] = _workout_identifier(workouts[fallback_idx])
-            debug["selected_workout_has_heart_rate_data"] = True
-            debug["selected_workout_heart_rate_point_count"] = len(hr_data) if isinstance(hr_data, list) else 0
-            debug["selected_workout_parseable_point_count"] = _parseable_hr_point_count(hr_data)
-            return hr_data, debug
-
-        fallback_idx = _first_workout_with_raw_entries(workouts)
-        if fallback_idx is not None:
-            hr_data = workouts[fallback_idx].get("heartRateData")
-            debug["selected_workout_index"] = fallback_idx
-            debug["selected_workout_id"] = _workout_identifier(workouts[fallback_idx])
-            debug["selected_workout_has_heart_rate_data"] = True
-            debug["selected_workout_heart_rate_point_count"] = len(hr_data) if isinstance(hr_data, list) else 0
-            debug["selected_workout_parseable_point_count"] = 0
-            return hr_data, debug
-
-    return [], debug
+    selected = workouts[index]
+    hr_data = selected.get("heartRateData")
+    parseable_count = _parseable_hr_point_count(hr_data)
+    debug["selected_workout_index"] = index
+    debug["selected_workout_id"] = _workout_identifier(selected)
+    debug["selected_workout_has_heart_rate_data"] = isinstance(hr_data, list) and len(hr_data) > 0
+    debug["selected_workout_heart_rate_point_count"] = len(hr_data) if isinstance(hr_data, list) else 0
+    debug["selected_workout_parseable_point_count"] = parseable_count
+    return parseable_count
 
 
-def _iter_json_candidates(payload: Any) -> tuple[list[Any], dict[str, Any]]:
+def _discover_workouts(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
+    for key in WORKOUT_WRAPPER_KEYS:
+        wrapper = payload.get(key) if key != "data" else payload.get("data")
+        if isinstance(wrapper, dict) and isinstance(wrapper.get("workouts"), list):
+            workouts = [w for w in wrapper["workouts"] if isinstance(w, dict)]
+            return workouts, "auto_health_export_data_workouts" if key == "data" else f"wrapper_dict_workouts:{key}"
+
+    if isinstance(payload.get("workouts"), list):
+        return [w for w in payload["workouts"] if isinstance(w, dict)], "top_level_workouts"
+    return [], "generic"
+
+
+def _iter_json_candidates(
+    payload: Any,
+    *,
+    fit_start: datetime | None,
+    fit_end: datetime | None,
+) -> tuple[list[Any], dict[str, Any]]:
     if isinstance(payload, list):
         return payload, _empty_debug("json_list")
-
     if not isinstance(payload, dict):
         return [], _empty_debug()
-
-    top_level_debug = _empty_debug()
-    top_level_debug["top_level_keys"] = sorted(payload.keys())
 
     direct = _sample_from_obj(payload)
     if direct is not None:
@@ -319,68 +237,67 @@ def _iter_json_candidates(payload: Any) -> tuple[list[Any], dict[str, Any]]:
         debug["top_level_keys"] = sorted(payload.keys())
         return [payload], debug
 
-    first_workout_debug: dict[str, Any] | None = None
-    first_unparseable_candidates: tuple[list[Any], dict[str, Any]] | None = None
+    workouts, parser_mode = _discover_workouts(payload)
+    if workouts:
+        debug = _empty_debug(parser_mode)
+        debug["top_level_keys"] = sorted(payload.keys())
+        if isinstance(payload.get("data"), dict):
+            debug["data_keys"] = sorted(payload["data"].keys())
+        debug["workouts_found"] = len(workouts)
 
-    data_wrapper = _merge_wrapper_with_top_level_selectors(payload.get("data"), payload)
-    if data_wrapper is not None:
-        result = _discover_workout_candidates(data_wrapper, parser_mode="auto_health_export_data_workouts")
-        if result is not None:
-            result[1]["top_level_keys"] = sorted(payload.keys())
-            result[1]["data_keys"] = sorted(data_wrapper.keys())
-            if result[0] and _parseable_hr_point_count(result[0]) > 0:
-                return result
-            if result[0] and first_unparseable_candidates is None:
-                first_unparseable_candidates = result
-            first_workout_debug = result[1]
+        overlap_idx, overlap_seconds = _select_workout_by_overlap(workouts, fit_start, fit_end)
+        has_overlap_selection = overlap_idx is not None and overlap_seconds is not None and overlap_seconds > 0
 
-    for key in WORKOUT_WRAPPER_KEYS:
-        wrapper = payload.get(key)
-        merged_wrapper = _merge_wrapper_with_top_level_selectors(wrapper, payload)
-        result = _discover_workout_candidates(merged_wrapper, parser_mode=f"wrapper_dict_workouts:{key}")
-        if result is not None:
-            result[1]["top_level_keys"] = sorted(payload.keys())
-            if isinstance(merged_wrapper, dict):
-                result[1]["data_keys"] = sorted(merged_wrapper.keys())
-            if result[0] and _parseable_hr_point_count(result[0]) > 0:
-                return result
-            if result[0] and first_unparseable_candidates is None:
-                first_unparseable_candidates = result
-            if first_workout_debug is None:
-                first_workout_debug = result[1]
+        if has_overlap_selection:
+            overlap_parseable_count = _set_selected_workout_debug(debug, workouts, overlap_idx)
+            if overlap_parseable_count > 0:
+                selected = workouts[overlap_idx]
+                hr_data = selected.get("heartRateData")
+                return hr_data if isinstance(hr_data, list) else [], debug
+
+        fallback_idx = _select_workout_by_parseable_points(workouts)
+        if fallback_idx is not None:
+            if has_overlap_selection:
+                debug["fallback_workout_index"] = fallback_idx
+                debug["fallback_workout_id"] = _workout_identifier(workouts[fallback_idx])
+            else:
+                _set_selected_workout_debug(debug, workouts, fallback_idx)
+                debug["fallback_workout_index"] = fallback_idx
+                debug["fallback_workout_id"] = _workout_identifier(workouts[fallback_idx])
+
+            selected = workouts[fallback_idx]
+            hr_data = selected.get("heartRateData")
+            return hr_data if isinstance(hr_data, list) else [], debug
+        return [], debug
 
     for key in DIRECT_LIST_WRAPPER_KEYS:
         value = payload.get(key)
         if isinstance(value, list):
-            list_result = (value, _empty_debug(parser_mode=f"wrapper_list:{key}"))
-            list_result[1]["top_level_keys"] = sorted(payload.keys())
-            if _parseable_hr_point_count(value) > 0:
-                return list_result
-            if first_unparseable_candidates is None:
-                first_unparseable_candidates = list_result
+            debug = _empty_debug(f"wrapper_list:{key}")
+            debug["top_level_keys"] = sorted(payload.keys())
+            return value, debug
 
-    if first_unparseable_candidates is not None:
-        return first_unparseable_candidates
-    if first_workout_debug is not None:
-        return [], first_workout_debug
-    return [], top_level_debug
+    return [], _empty_debug()
 
 
-def _parse_json_payload_with_debug(text: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def _parse_json_payload_with_debug(
+    text: str,
+    *,
+    fit_start: datetime | None,
+    fit_end: datetime | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as exc:
         raise AppleHrParseError("Invalid JSON payload") from exc
 
-    candidates, debug = _iter_json_candidates(payload)
+    candidates, debug = _iter_json_candidates(payload, fit_start=fit_start, fit_end=fit_end)
     samples, rejected, rejection_reasons = _parse_samples(candidates)
-
     debug["raw_heart_rate_entries_found"] = len(candidates)
     debug["parsed_heart_rate_entries_count"] = len(samples)
     debug["rejected_entries_count"] = rejected
     debug["rejection_reasons"] = rejection_reasons
     debug["extracted_hr_points"] = len(samples)
-
     return samples, debug
 
 
@@ -388,32 +305,19 @@ def parse_apple_hr_json(text: str) -> list[dict[str, Any]]:
     return parse_apple_hr_json_with_debug(text)["samples"]
 
 
-def parse_apple_hr_json_with_debug(text: str) -> dict[str, Any]:
-    samples, debug = _parse_json_payload_with_debug(text)
-    print(
-        "[apple_hr] JSON parse debug: "
-        f"mode={debug['parser_mode']}, "
-        f"top_level_keys={debug['top_level_keys']}, "
-        f"data_keys={debug['data_keys']}, "
-        f"workouts_found={debug['workouts_found']}, "
-        f"selected_idx={debug['selected_workout_index']}, "
-        f"selected_id={debug['selected_workout_id']}, "
-        f"selected_has_heartRateData={debug['selected_workout_has_heart_rate_data']}, "
-        f"selected_hr_points={debug['selected_workout_heart_rate_point_count']}, "
-        f"selected_parseable_hr_points={debug['selected_workout_parseable_point_count']}, "
-        f"fallback_idx={debug['fallback_workout_index']}, "
-        f"raw_entries={debug['raw_heart_rate_entries_found']}, "
-        f"parsed_entries={debug['parsed_heart_rate_entries_count']}, "
-        f"rejected_entries={debug['rejected_entries_count']}"
-    )
-    if debug["rejected_entries_count"] > 0:
-        print(f"[apple_hr] JSON parse rejections: {debug['rejection_reasons']}")
-    return {"samples": samples, "debug": debug}
+def parse_apple_hr_json_with_debug(
+    text: str,
+    *,
+    fit_start: datetime | None = None,
+    fit_end: datetime | None = None,
+) -> dict[str, Any]:
+    samples, debug = _parse_json_payload_with_debug(text, fit_start=fit_start, fit_end=fit_end)
+    return {"samples": samples, "debug": debug, "source_type": "json"}
 
 
 def parse_apple_hr_csv(text: str) -> list[dict[str, Any]]:
     reader = csv.DictReader(StringIO(text))
-    samples, _rejected, _reasons = _parse_samples(list(reader))
+    samples, _, _ = _parse_samples(list(reader))
     return samples
 
 
@@ -430,50 +334,40 @@ def parse_apple_hr_csv_with_debug(text: str) -> tuple[list[dict[str, Any]], dict
     return samples, debug
 
 
-def parse_apple_hr_text_details(text: str, source_type: str = "auto") -> dict[str, Any]:
+def parse_apple_hr_text_details(
+    text: str,
+    source_type: str = "auto",
+    *,
+    fit_start: datetime | None = None,
+    fit_end: datetime | None = None,
+) -> dict[str, Any]:
     mode = (source_type or "auto").lower()
-
     if mode == "json":
-        parsed = parse_apple_hr_json_with_debug(text)
-        parsed["source_type"] = "json"
-        return parsed
-
+        return parse_apple_hr_json_with_debug(text, fit_start=fit_start, fit_end=fit_end)
     if mode == "csv":
         samples, debug = parse_apple_hr_csv_with_debug(text)
-        return {
-            "samples": samples,
-            "source_type": "csv",
-            "debug": debug,
-        }
-
+        return {"samples": samples, "source_type": "csv", "debug": debug}
     if mode == "auto":
         stripped = text.lstrip()
         inferred_mode = "json" if stripped.startswith(("{", "[")) else "csv"
-        return parse_apple_hr_text_details(text, source_type=inferred_mode)
-
+        return parse_apple_hr_text_details(text, source_type=inferred_mode, fit_start=fit_start, fit_end=fit_end)
     raise AppleHrParseError("Unsupported Apple source type")
 
 
 def normalize_hr_series(series: list[dict[str, Any]], min_hr: int = 30, max_hr: int = 240) -> list[dict[str, Any]]:
     normalized: dict[str, int] = {}
-
     for item in series:
         if not isinstance(item, dict):
             continue
-
         ts = item.get("timestamp")
         hr = item.get("hr")
         if ts in (None, "") or hr is None:
             continue
-
         try:
             value = int(hr)
         except (TypeError, ValueError):
             continue
-
         if value < min_hr or value > max_hr:
             continue
-
         normalized[str(ts)] = value
-
     return [{"timestamp": ts, "hr": normalized[ts]} for ts in sorted(normalized.keys())]

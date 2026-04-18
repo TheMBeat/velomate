@@ -188,10 +188,10 @@ def test_api_merge_run_parses_string_boolean_flags():
     send_json.assert_called_once_with(200, {"ok": True})
 
 
-def test_api_merge_run_passes_matching_strategy_option():
+def test_api_merge_run_ignores_obsolete_strategy_and_tolerance_options():
     handler = webapp._Handler.__new__(webapp._Handler)
     handler.path = "/api/tools/fit-hr-merge/run"
-    payload = b'{"import_token":"t","matching_strategy":"interpolate"}'
+    payload = b'{"import_token":"t","matching_strategy":"nearest","tolerance_seconds":5}'
     handler.headers = {"Content-Length": str(len(payload))}
     handler.rfile = io.BytesIO(payload)
     handler.wfile = io.BytesIO()
@@ -205,7 +205,8 @@ def test_api_merge_run_passes_matching_strategy_option():
         handler.do_POST()
 
     options = run_merge.call_args.args[1]
-    assert options.matching_strategy == "interpolate"
+    assert not hasattr(options, "matching_strategy")
+    assert not hasattr(options, "tolerance_seconds")
     send_json.assert_called_once_with(200, {"ok": True})
 
 

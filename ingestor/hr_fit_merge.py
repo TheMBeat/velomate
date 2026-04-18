@@ -3,16 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from collections import defaultdict, deque
-import json
 from io import BytesIO
+import json
 import struct
 
-from apple_hr import parse_apple_hr_csv, parse_apple_hr_json_with_debug, normalize_hr_series
 from apple_hr import AppleHrParseError, normalize_hr_series, parse_apple_hr_text_details
 from fit_import import FitImportError
-from hr_matching import MATCHING_STRATEGIES
 from fitparse import FitFile
 
 
@@ -22,12 +20,10 @@ class FitHrMergeError(ValueError):
 
 @dataclass(frozen=True)
 class MergeOptions:
-    tolerance_seconds: int = 2
     overwrite_existing_hr: bool = False
     ignore_implausible_hr: bool = True
     min_hr: int = 30
     max_hr: int = 240
-    matching_strategy: str = "nearest"
 
 
 FIT_EPOCH = datetime(1989, 12, 31, tzinfo=timezone.utc)
@@ -81,23 +77,83 @@ def parse_apple_hr_payload(content: bytes, source_type: str = "auto") -> list[di
     return parse_apple_hr_payload_details(content, source_type=source_type)["samples"]
 
 
-def parse_apple_hr_payload_details(content: bytes, source_type: str = "auto") -> dict:
+def parse_apple_hr_payload_details(
+    content: bytes,
+    source_type: str = "auto",
+    *,
+    fit_start_time: str | None = None,
+    fit_end_time: str | None = None,
+) -> dict:
     text = content.decode("utf-8", errors="replace")
-    print(
-        "[fit_hr_merge.parse_apple_hr_payload_details] "
-        f"source_type_request={source_type}, bytes={len(content)}, decoded_chars={len(text)}"
-    )
+    fit_start = datetime.fromisoformat(fit_start_time.replace("Z", "+00:00")) if fit_start_time else None
+    fit_end = datetime.fromisoformat(fit_end_time.replace("Z", "+00:00")) if fit_end_time else None
     try:
-        result = parse_apple_hr_text_details(text, source_type=source_type)
+        result = parse_apple_hr_text_details(text, source_type=source_type, fit_start=fit_start, fit_end=fit_end)
     except AppleHrParseError as exc:
         raise FitHrMergeError(str(exc)) from exc
-    print(
-        "[fit_hr_merge.parse_apple_hr_payload_details] "
-        f"detected_source_type={result.get('source_type')}, "
-        f"parser_mode={result.get('debug', {}).get('parser_mode')}, "
-        f"samples_from_result={len(result.get('samples', []))}"
-    )
     return result
+
+
+def interpolate_hr(samples: list[dict], fit_timestamps: list[str]) -> list[int | None]:
+    """Map sparse Apple HR samples to FIT timestamps using linear interpolation.
+
+    Returns a list aligned to `fit_timestamps` containing int HR values or None.
+    Interpolation is only performed inside the Apple HR sample time range.
+    """
+    if not fit_timestamps:
+        return []
+    if not samples:
+        return [None] * len(fit_timestamps)
+
+    parsed = []
+    for item in samples:
+        ts = item.get("timestamp")
+        hr = item.get("hr")
+        if ts in (None, "") or hr is None:
+            continue
+        parsed.append(
+            {
+                "timestamp": datetime.fromisoformat(str(ts).replace("Z", "+00:00")).astimezone(timezone.utc),
+                "hr": int(hr),
+            }
+        )
+    parsed.sort(key=lambda x: x["timestamp"])
+    if not parsed:
+        return [None] * len(fit_timestamps)
+
+    out: list[int | None] = []
+    first_ts = parsed[0]["timestamp"]
+    last_ts = parsed[-1]["timestamp"]
+    right = 0
+
+    for fit_ts_str in fit_timestamps:
+        fit_ts = datetime.fromisoformat(fit_ts_str.replace("Z", "+00:00")).astimezone(timezone.utc)
+        if fit_ts < first_ts or fit_ts > last_ts:
+            out.append(None)
+            continue
+
+        while right < len(parsed) and parsed[right]["timestamp"] < fit_ts:
+            right += 1
+
+        if right < len(parsed) and parsed[right]["timestamp"] == fit_ts:
+            out.append(parsed[right]["hr"])
+            continue
+        if right == 0 or right >= len(parsed):
+            out.append(None)
+            continue
+
+        left_point = parsed[right - 1]
+        right_point = parsed[right]
+        left_ts = left_point["timestamp"]
+        right_ts = right_point["timestamp"]
+        total_seconds = (right_ts - left_ts).total_seconds()
+        if total_seconds <= 0:
+            out.append(left_point["hr"])
+            continue
+        ratio = (fit_ts - left_ts).total_seconds() / total_seconds
+        hr_value = left_point["hr"] + (right_point["hr"] - left_point["hr"]) * ratio
+        out.append(int(round(hr_value)))
+    return out
 
 
 def merge_fit_with_hr(fit_records: list[dict], hr_series: list[dict], options: MergeOptions) -> tuple[list[dict], dict]:
@@ -108,34 +164,23 @@ def merge_fit_with_hr(fit_records: list[dict], hr_series: list[dict], options: M
     )
     if not fit_records:
         raise FitHrMergeError("FIT record set is empty")
-    matcher = MATCHING_STRATEGIES.get(options.matching_strategy)
-    if matcher is None:
-        raise FitHrMergeError(f"Unsupported matching strategy: {options.matching_strategy}")
+    fit_timestamps = [r["timestamp"] for r in fit_records]
+    interpolated = interpolate_hr(normalized, fit_timestamps)
 
-    fit_times = [datetime.fromisoformat(r["timestamp"].replace("Z", "+00:00")) for r in fit_records]
-    apple = [{"timestamp": datetime.fromisoformat(s["timestamp"].replace("Z", "+00:00")), "hr": s["hr"]} for s in normalized]
-
-    start = fit_times[0]
-    end = fit_times[-1]
-    in_window = [s for s in apple if start <= s["timestamp"] <= end]
-
-    matched = 0
+    interpolated_count = sum(1 for value in interpolated if value is not None)
     written = 0
-    used_timestamps = []
+    used_timestamps: list[datetime] = []
     merged = []
 
     for idx, rec in enumerate(fit_records):
-        ts = fit_times[idx]
-        best = matcher(ts, in_window, options.tolerance_seconds)
-
+        new_hr = interpolated[idx]
         new_rec = dict(rec)
-        if best is not None:
-            matched += 1
+        if new_hr is not None:
             existing_hr = rec.get("hr")
             if existing_hr is None or options.overwrite_existing_hr:
-                new_rec["hr"] = best["hr"]
+                new_rec["hr"] = new_hr
                 written += 1
-                used_timestamps.append(best["timestamp"])
+                used_timestamps.append(datetime.fromisoformat(rec["timestamp"].replace("Z", "+00:00")).astimezone(timezone.utc))
         merged.append(new_rec)
 
     coverage = (written / len(fit_records) * 100.0) if fit_records else 0.0
@@ -143,9 +188,9 @@ def merge_fit_with_hr(fit_records: list[dict], hr_series: list[dict], options: M
 
     report = {
         "apple_points_total": len(normalized),
-        "apple_points_in_fit_window": len(in_window),
+        "apple_points_in_fit_window": interpolated_count,
         "fit_records_total": len(fit_records),
-        "hr_points_matched": matched,
+        "hr_points_matched": interpolated_count,
         "hr_points_written": written,
         "coverage_pct": round(coverage, 2),
         "first_hr_timestamp_used": _to_utc_iso(min(used_timestamps)) if used_timestamps else None,

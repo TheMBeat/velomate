@@ -37,12 +37,10 @@ def parse_bool_flag(value, *, default: bool) -> bool:
 
 def parse_merge_options(payload: dict) -> MergeOptions:
     return MergeOptions(
-        tolerance_seconds=int(payload.get("tolerance_seconds", 2)),
         overwrite_existing_hr=parse_bool_flag(payload.get("overwrite_existing_hr", False), default=False),
         ignore_implausible_hr=parse_bool_flag(payload.get("ignore_implausible_hr", True), default=True),
         min_hr=int(payload.get("min_hr", 30)),
         max_hr=int(payload.get("max_hr", 240)),
-        matching_strategy=str(payload.get("matching_strategy", "nearest")),
     )
 
 
@@ -51,7 +49,12 @@ def preview_merge(fit_filename: str, fit_content: bytes, apple_content: bytes, a
         raise FitHrMergeError("FIT input must end with .fit")
 
     fit_payload = parse_fit_records_for_merge(fit_content)
-    apple_parsed = parse_apple_hr_payload_details(apple_content, source_type=apple_source_type)
+    apple_parsed = parse_apple_hr_payload_details(
+        apple_content,
+        source_type=apple_source_type,
+        fit_start_time=fit_payload["summary"]["start_time"],
+        fit_end_time=fit_payload["summary"]["end_time"],
+    )
     apple_raw = apple_parsed["samples"]
     apple_debug = _build_apple_debug_response(apple_parsed)
 
@@ -91,11 +94,20 @@ def preview_merge(fit_filename: str, fit_content: bytes, apple_content: bytes, a
             "point_count": len(apple_raw),
             "first_timestamp": apple_raw[0]["timestamp"] if apple_raw else None,
             "last_timestamp": apple_raw[-1]["timestamp"] if apple_raw else None,
-            "debug": apple_debug,
         },
         "estimated_overlap_points": overlap_count,
-        "warnings": [] if overlap_count else ["Low overlap between Apple HR and FIT timeline; verify timezone/export range."],
+        "warnings": _preview_warnings(point_count=len(apple_raw), overlap_count=overlap_count, fit_count=fit_payload["summary"]["sample_count"]),
     }
+
+
+def _preview_warnings(*, point_count: int, overlap_count: int, fit_count: int) -> list[str]:
+    if point_count == 0:
+        return ["No Apple HR points extracted"]
+    if overlap_count == 0:
+        return ["No overlap with FIT timeline"]
+    if overlap_count < fit_count:
+        return ["Partial HR coverage"]
+    return []
 
 
 def run_merge(payload: dict, options: MergeOptions) -> tuple[str, bytes, dict]:

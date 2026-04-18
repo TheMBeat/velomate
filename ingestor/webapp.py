@@ -67,7 +67,12 @@ def _handle_hr_merge_preview(fit_filename: str, fit_content: bytes, apple_conten
         raise FitHrMergeError("FIT input must end with .fit")
 
     fit_payload = parse_fit_records_for_merge(fit_content)
-    apple_parsed = parse_apple_hr_payload_details(apple_content, source_type=apple_source_type)
+    apple_parsed = parse_apple_hr_payload_details(
+        apple_content,
+        source_type=apple_source_type,
+        fit_start_time=fit_payload["summary"]["start_time"],
+        fit_end_time=fit_payload["summary"]["end_time"],
+    )
     apple_raw = list(apple_parsed.get("samples", []))
     raw_debug = dict(apple_parsed.get("debug", {}))
     fit_start = fit_payload["summary"]["start_time"]
@@ -87,6 +92,7 @@ def _handle_hr_merge_preview(fit_filename: str, fit_content: bytes, apple_conten
         "selected_workout_heart_rate_point_count": raw_debug.get("selected_workout_heart_rate_point_count", 0),
         "selected_workout_parseable_point_count": raw_debug.get("selected_workout_parseable_point_count", 0),
         "fallback_workout_index": raw_debug.get("fallback_workout_index"),
+        "fallback_workout_id": raw_debug.get("fallback_workout_id"),
         "raw_heart_rate_entries_found": raw_debug.get("raw_heart_rate_entries_found", 0),
         "parsed_heart_rate_entries_count": raw_debug.get("parsed_heart_rate_entries_count", len(apple_raw)),
         "rejected_entries_count": raw_debug.get("rejected_entries_count", 0),
@@ -113,11 +119,11 @@ def _handle_hr_merge_preview(fit_filename: str, fit_content: bytes, apple_conten
         f"apple_bytes={apple_debug.get('apple_bytes')}, "
         f"extracted_hr_points={len(apple_raw)}, overlap_points={overlap_count}"
     )
-    warnings = []
-    if not apple_raw:
-        warnings.append("No Apple HR points could be parsed from the uploaded file; inspect apple_debug for parser/input details.")
-    elif overlap_count == 0:
-        warnings.append("Apple HR points were parsed but none overlap the FIT timeline; verify timezone/export range.")
+    warnings = _preview_warnings(
+        point_count=len(apple_raw),
+        overlap_count=overlap_count,
+        fit_count=fit_payload["summary"]["sample_count"],
+    )
     merge_payload = {
         "fit_filename": fit_filename,
         "fit_bytes": fit_content,
@@ -132,13 +138,22 @@ def _handle_hr_merge_preview(fit_filename: str, fit_content: bytes, apple_conten
             "point_count": len(apple_raw),
             "first_timestamp": apple_raw[0]["timestamp"] if apple_raw else None,
             "last_timestamp": apple_raw[-1]["timestamp"] if apple_raw else None,
-            "debug": apple_debug,
         },
         "estimated_overlap_points": overlap_count,
         "warnings": warnings,
     }
     token = _store_pending(merge_payload)
     return {"import_token": token, **response}
+
+
+def _preview_warnings(*, point_count: int, overlap_count: int, fit_count: int) -> list[str]:
+    if point_count == 0:
+        return ["No Apple HR points extracted"]
+    if overlap_count == 0:
+        return ["No overlap with FIT timeline"]
+    if overlap_count < fit_count:
+        return ["Partial HR coverage"]
+    return []
 
 
 def _run_hr_merge(import_token: str, options: MergeOptions) -> dict:
@@ -204,7 +219,6 @@ def _render_hr_merge_page() -> str:
         <form id='runForm'>
           <input type='hidden' name='import_token' />
           <div class='grid'>
-            <div><label>Tolerance (seconds)</label><br/><input type='number' name='tolerance_seconds' value='2' min='0' max='30'/></div>
             <div><label>Overwrite existing FIT HR</label><br/><select name='overwrite_existing_hr'><option value='false'>No</option><option value='true'>Yes</option></select></div>
             <div><label>Ignore implausible HR</label><br/><select name='ignore_implausible_hr'><option value='true'>Yes</option><option value='false'>No</option></select></div>
             <div><label>HR min / max</label><br/><input type='number' name='min_hr' value='30' min='1' max='240'/> <input type='number' name='max_hr' value='240' min='60' max='260'/></div>
@@ -224,7 +238,7 @@ def _render_hr_merge_page() -> str:
         const appleDebugPanel = document.getElementById('appleDebugPanel');
 
         const renderAppleDebug = (data) => {
-          const appleDebug = data.apple_debug || (data.apple_summary && data.apple_summary.debug) || null;
+          const appleDebug = data.apple_debug || null;
           if (!appleDebug) {
             appleDebugOutput.textContent = 'No parser debug available for this response.';
             return;
@@ -242,6 +256,7 @@ def _render_hr_merge_page() -> str:
             selected_workout_heart_rate_point_count: appleDebug.selected_workout_heart_rate_point_count ?? 0,
             selected_workout_parseable_point_count: appleDebug.selected_workout_parseable_point_count ?? 0,
             fallback_workout_index: appleDebug.fallback_workout_index ?? null,
+            fallback_workout_id: appleDebug.fallback_workout_id ?? null,
             raw_heart_rate_entries_found: appleDebug.raw_heart_rate_entries_found ?? 0,
             parsed_heart_rate_entries_count: appleDebug.parsed_heart_rate_entries_count ?? 0,
             rejected_entries_count: appleDebug.rejected_entries_count ?? 0,
@@ -271,7 +286,6 @@ def _render_hr_merge_page() -> str:
           const form = new FormData(e.target);
           const payload = {
             import_token: form.get('import_token') || importToken,
-            tolerance_seconds: Number(form.get('tolerance_seconds') || 2),
             overwrite_existing_hr: form.get('overwrite_existing_hr') === 'true',
             ignore_implausible_hr: form.get('ignore_implausible_hr') !== 'false',
             min_hr: Number(form.get('min_hr') || 30),
