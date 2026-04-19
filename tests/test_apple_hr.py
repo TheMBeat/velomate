@@ -183,3 +183,16 @@ def test_parse_json_accepts_bom_multiple_wrappers_and_field_aliases():
         {"timestamp": "2026-04-11T07:00:20Z", "hr": 121},
     ]
     assert parsed["debug"]["workouts_found"] == 1
+
+
+def test_auto_mode_prefers_json_then_falls_back_to_csv():
+    json_payload = '{"samples":[{"timestamp":"2026-04-11T07:00:20Z","hr":121}]}'
+    csv_payload = "timestamp,hr\n2026-04-11T07:01:06Z,126\n"
+
+    parsed_json = apple_hr.parse_apple_hr_text_details(json_payload, source_type="auto")
+    parsed_csv = apple_hr.parse_apple_hr_text_details(csv_payload, source_type="auto")
+
+    assert parsed_json["source_type"] == "json"
+    assert parsed_json["samples"][0]["hr"] == 121
+    assert parsed_csv["source_type"] == "csv"
+    assert parsed_csv["debug"]["parser_mode"] == "auto_csv_fallback"

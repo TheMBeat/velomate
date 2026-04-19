@@ -36,3 +36,5 @@ def test_preview_merge_includes_top_level_apple_debug_with_sample_preview():
     assert len(response["apple_debug"]["sample_preview"]) == 5
     assert response["apple_summary"]["point_count"] == 7
     assert response["warnings"] == ["Partial HR coverage"]
+    assert response["parser_diagnostics"]["apple"]["source_type_detected"] == "json"
+    assert "timing_ms" in response

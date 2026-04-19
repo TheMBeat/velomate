@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from time import perf_counter
+
 from hr_fit_merge import (
     FitHrMergeError,
     MergeOptions,
@@ -45,16 +47,21 @@ def parse_merge_options(payload: dict) -> MergeOptions:
 
 
 def preview_merge(fit_filename: str, fit_content: bytes, apple_content: bytes, apple_source_type: str) -> dict:
+    started = perf_counter()
     if not fit_filename.lower().endswith(".fit"):
         raise FitHrMergeError("FIT input must end with .fit")
 
+    fit_started = perf_counter()
     fit_payload = parse_fit_records_for_merge(fit_content)
+    fit_ms = round((perf_counter() - fit_started) * 1000, 3)
+    apple_started = perf_counter()
     apple_parsed = parse_apple_hr_payload_details(
         apple_content,
         source_type=apple_source_type,
         fit_start_time=fit_payload["summary"]["start_time"],
         fit_end_time=fit_payload["summary"]["end_time"],
     )
+    apple_ms = round((perf_counter() - apple_started) * 1000, 3)
     apple_raw = apple_parsed["samples"]
     apple_debug = _build_apple_debug_response(apple_parsed)
 
@@ -81,13 +88,14 @@ def preview_merge(fit_filename: str, fit_content: bytes, apple_content: bytes, a
             f"({apple_debug.get('detected_source_type')} vs {apple_debug.get('parser_mode')})"
         )
 
-    return {
+    payload = {
         "fit_filename": fit_filename,
         "fit_bytes": fit_content,
         "fit_records": fit_payload["records"],
         "apple_raw": apple_raw,
         "apple_debug": apple_debug,
-    }, {
+    }
+    response = {
         "fit_summary": fit_payload["summary"],
         "apple_debug": apple_debug,
         "apple_summary": {
@@ -97,7 +105,24 @@ def preview_merge(fit_filename: str, fit_content: bytes, apple_content: bytes, a
         },
         "estimated_overlap_points": overlap_count,
         "warnings": _preview_warnings(point_count=len(apple_raw), overlap_count=overlap_count, fit_count=fit_payload["summary"]["sample_count"]),
+        "parser_diagnostics": {
+            "fit": {"record_count": fit_payload["summary"]["sample_count"], "duration_ms": fit_ms},
+            "apple": {
+                "source_type_requested": apple_source_type,
+                "source_type_detected": apple_parsed.get("source_type"),
+                "raw_entries": apple_debug.get("raw_heart_rate_entries_found", 0),
+                "parsed_entries": len(apple_raw),
+                "rejected_entries": apple_debug.get("rejected_entries_count", 0),
+                "duration_ms": apple_ms,
+            },
+        },
+        "timing_ms": {
+            "fit_parse": fit_ms,
+            "apple_parse": apple_ms,
+            "total": round((perf_counter() - started) * 1000, 3),
+        },
     }
+    return payload, response
 
 
 def _preview_warnings(*, point_count: int, overlap_count: int, fit_count: int) -> list[str]:
@@ -111,5 +136,21 @@ def _preview_warnings(*, point_count: int, overlap_count: int, fit_count: int) -
 
 
 def run_merge(payload: dict, options: MergeOptions) -> tuple[str, bytes, dict]:
+    started = perf_counter()
+    merge_started = perf_counter()
     merged_records, report = merge_fit_with_hr(payload["fit_records"], payload["apple_raw"], options)
-    return render_merged_output_fit(payload["fit_filename"], payload["fit_bytes"], merged_records, report)
+    merge_ms = round((perf_counter() - merge_started) * 1000, 3)
+    writer_started = perf_counter()
+    output_name, content, report = render_merged_output_fit(payload["fit_filename"], payload["fit_bytes"], merged_records, report)
+    writer_ms = round((perf_counter() - writer_started) * 1000, 3)
+    report = dict(report)
+    report["writer_diagnostics"] = {
+        "fit_records_patched_in_binary": report.get("fit_records_patched_in_binary", 0),
+        "output_bytes": len(content),
+    }
+    report["timing_ms"] = {
+        "merge": merge_ms,
+        "write_and_validate": writer_ms,
+        "total": round((perf_counter() - started) * 1000, 3),
+    }
+    return output_name, content, report

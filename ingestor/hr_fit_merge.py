@@ -387,6 +387,12 @@ def rewrite_fit_hr_values(original_fit: bytes, merged_records: list[dict]) -> tu
 def render_merged_output_fit(original_fit_name: str, original_fit_bytes: bytes, merged_records: list[dict], report: dict) -> tuple[str, bytes, dict]:
     merged_bytes, patched = rewrite_fit_hr_values(original_fit_bytes, merged_records)
     _validate_fit_crc(merged_bytes)
+    # Ensure merged artifact remains parseable as FIT, not only CRC-consistent.
+    try:
+        fit = FitFile(BytesIO(merged_bytes), check_crc=False)
+        fit.parse()
+    except Exception as exc:
+        raise FitHrMergeError("Merged FIT output is not parseable") from exc
     enriched = dict(report)
     enriched["fit_records_patched_in_binary"] = patched
     if enriched.get("hr_points_written", 0) > 0 and patched == 0:

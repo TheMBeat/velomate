@@ -360,9 +360,12 @@ def parse_apple_hr_text_details(
         samples, debug = parse_apple_hr_csv_with_debug(text)
         return {"samples": samples, "source_type": "csv", "debug": debug}
     if mode == "auto":
-        stripped = text.lstrip()
-        inferred_mode = "json" if stripped.startswith(("{", "[")) else "csv"
-        return parse_apple_hr_text_details(text, source_type=inferred_mode, fit_start=fit_start, fit_end=fit_end)
+        try:
+            return parse_apple_hr_text_details(text, source_type="json", fit_start=fit_start, fit_end=fit_end)
+        except AppleHrParseError:
+            samples, debug = parse_apple_hr_csv_with_debug(text)
+            debug["parser_mode"] = "auto_csv_fallback"
+            return {"samples": samples, "source_type": "csv", "debug": debug}
     raise AppleHrParseError("Unsupported Apple source type")
 
 

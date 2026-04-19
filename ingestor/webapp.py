@@ -6,16 +6,16 @@ import cgi
 import json
 from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from time import perf_counter
 from urllib.parse import parse_qs, urlparse
+from uuid import uuid4
 
 from fit_import import FitImportError
 from hr_fit_merge import (
     FitHrMergeError,
     MergeOptions,
-    parse_apple_hr_payload_details,
-    parse_fit_records_for_merge,
 )
-from hr_merge_service import parse_merge_options, run_merge
+from hr_merge_service import parse_merge_options, preview_merge, run_merge
 from import_service import persist_fit_import, preview_fit_import
 from stores import ExpiringTokenStore
 
@@ -63,100 +63,21 @@ def _handle_fit_preview(filename: str, content: bytes) -> dict:
 
 
 def _handle_hr_merge_preview(fit_filename: str, fit_content: bytes, apple_content: bytes, apple_source_type: str) -> dict:
-    if not fit_filename.lower().endswith(".fit"):
-        raise FitHrMergeError("FIT input must end with .fit")
-
-    fit_payload = parse_fit_records_for_merge(fit_content)
-    apple_parsed = parse_apple_hr_payload_details(
-        apple_content,
-        source_type=apple_source_type,
-        fit_start_time=fit_payload["summary"]["start_time"],
-        fit_end_time=fit_payload["summary"]["end_time"],
-    )
-    apple_raw = list(apple_parsed.get("samples", []))
-    raw_debug = dict(apple_parsed.get("debug", {}))
-    fit_start = fit_payload["summary"]["start_time"]
-    fit_end = fit_payload["summary"]["end_time"]
-    overlap_count = sum(1 for row in apple_raw if fit_start <= row.get("timestamp", "") <= fit_end)
-    apple_text = apple_content.decode("utf-8", errors="replace")
-    apple_debug = {
-        "requested_source_type": apple_source_type,
-        "detected_source_type": apple_parsed.get("source_type"),
-        "parser_mode": raw_debug.get("parser_mode"),
-        "top_level_keys": raw_debug.get("top_level_keys", []),
-        "data_keys": raw_debug.get("data_keys", []),
-        "workouts_found": raw_debug.get("workouts_found", 0),
-        "selected_workout_index": raw_debug.get("selected_workout_index"),
-        "selected_workout_id": raw_debug.get("selected_workout_id"),
-        "selected_workout_has_heart_rate_data": raw_debug.get("selected_workout_has_heart_rate_data", False),
-        "selected_workout_heart_rate_point_count": raw_debug.get("selected_workout_heart_rate_point_count", 0),
-        "selected_workout_parseable_point_count": raw_debug.get("selected_workout_parseable_point_count", 0),
-        "fallback_workout_index": raw_debug.get("fallback_workout_index"),
-        "fallback_workout_id": raw_debug.get("fallback_workout_id"),
-        "raw_heart_rate_entries_found": raw_debug.get("raw_heart_rate_entries_found", 0),
-        "parsed_heart_rate_entries_count": raw_debug.get("parsed_heart_rate_entries_count", len(apple_raw)),
-        "rejected_entries_count": raw_debug.get("rejected_entries_count", 0),
-        "rejection_reasons": raw_debug.get("rejection_reasons", {}),
-        "sample_preview": apple_raw[:5],
-        "apple_bytes": len(apple_content),
-        "apple_text_preview": apple_text[:200],
-    }
-    print(
-        "[webapp._handle_hr_merge_preview] Apple parse debug: "
-        f"requested_source_type={apple_debug.get('requested_source_type')}, "
-        f"detected_source_type={apple_debug.get('detected_source_type')}, "
-        f"parser_mode={apple_debug.get('parser_mode')}, "
-        f"workouts_found={apple_debug.get('workouts_found')}, "
-        f"selected_workout_index={apple_debug.get('selected_workout_index')}, "
-        f"selected_workout_id={apple_debug.get('selected_workout_id')}, "
-        f"selected_workout_has_heart_rate_data={apple_debug.get('selected_workout_has_heart_rate_data')}, "
-        f"selected_workout_heart_rate_point_count={apple_debug.get('selected_workout_heart_rate_point_count')}, "
-        f"selected_workout_parseable_point_count={apple_debug.get('selected_workout_parseable_point_count')}, "
-        f"fallback_workout_index={apple_debug.get('fallback_workout_index')}, "
-        f"raw_heart_rate_entries_found={apple_debug.get('raw_heart_rate_entries_found')}, "
-        f"parsed_heart_rate_entries_count={apple_debug.get('parsed_heart_rate_entries_count')}, "
-        f"rejected_entries_count={apple_debug.get('rejected_entries_count')}, "
-        f"apple_bytes={apple_debug.get('apple_bytes')}, "
-        f"extracted_hr_points={len(apple_raw)}, overlap_points={overlap_count}"
-    )
-    warnings = _preview_warnings(
-        point_count=len(apple_raw),
-        overlap_count=overlap_count,
-        fit_count=fit_payload["summary"]["sample_count"],
-    )
-    merge_payload = {
-        "fit_filename": fit_filename,
-        "fit_bytes": fit_content,
-        "fit_records": fit_payload["records"],
-        "apple_raw": apple_raw,
-        "apple_debug": apple_debug,
-    }
-    response = {
-        "fit_summary": fit_payload["summary"],
-        "apple_debug": apple_debug,
-        "apple_summary": {
-            "point_count": len(apple_raw),
-            "first_timestamp": apple_raw[0]["timestamp"] if apple_raw else None,
-            "last_timestamp": apple_raw[-1]["timestamp"] if apple_raw else None,
-        },
-        "estimated_overlap_points": overlap_count,
-        "warnings": warnings,
-    }
+    merge_payload, response = preview_merge(fit_filename, fit_content, apple_content, apple_source_type)
+    apple_debug = dict(response.get("apple_debug", {}))
+    apple_debug["requested_source_type"] = apple_source_type
+    apple_debug["apple_bytes"] = len(apple_content)
+    apple_debug["apple_text_preview"] = apple_content.decode("utf-8", errors="replace")[:200]
+    response["apple_debug"] = apple_debug
+    response["parser_diagnostics"] = dict(response.get("parser_diagnostics", {}))
+    response["parser_diagnostics"]["apple_debug_present"] = True
+    merge_payload["apple_debug"] = apple_debug
     token = _store_pending(merge_payload)
     return {"import_token": token, **response}
 
 
-def _preview_warnings(*, point_count: int, overlap_count: int, fit_count: int) -> list[str]:
-    if point_count == 0:
-        return ["No Apple HR points extracted"]
-    if overlap_count == 0:
-        return ["No overlap with FIT timeline"]
-    if overlap_count < fit_count:
-        return ["Partial HR coverage"]
-    return []
-
-
 def _run_hr_merge(import_token: str, options: MergeOptions) -> dict:
+    started = perf_counter()
     payload = _load_pending(import_token, pop=False)
     output_name, content, report = run_merge(payload, options)
     artifact_token = _store_merged_artifact(output_name, content, report)
@@ -166,6 +87,11 @@ def _run_hr_merge(import_token: str, options: MergeOptions) -> dict:
         "report": report,
         "apple_debug": payload.get("apple_debug", {}),
         "output_format": "fit",
+        "writer_diagnostics": report.get("writer_diagnostics", {}),
+        "timing_ms": {
+            "service_total": round((perf_counter() - started) * 1000, 3),
+            **report.get("timing_ms", {}),
+        },
     }
 
 def _render_upload_page() -> str:
@@ -236,6 +162,31 @@ def _render_hr_merge_page() -> str:
         const output = document.getElementById('output');
         const appleDebugOutput = document.getElementById('appleDebugOutput');
         const appleDebugPanel = document.getElementById('appleDebugPanel');
+        const createRunId = () => {
+          if (window.crypto && typeof window.crypto.randomUUID === 'function') return window.crypto.randomUUID();
+          return `run-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        };
+        const pad = (num) => String(num).padStart(2, '0');
+        const tracePrefix = (runId, stepId, level='TRACE') => `[FIT-HR-Merge][${level}][${runId}][STEP ${pad(stepId)}]`;
+        const excerpt = (value) => String(value ?? '').slice(0, 400);
+        const traceError = (runId, stepId, title, error, extras={}) => {
+          const details = {
+            error_name: error?.name || 'Error',
+            message: error?.message || String(error),
+            stack: excerpt(error?.stack || ''),
+            http_status: extras.http_status ?? null,
+            response_body_excerpt: excerpt(extras.response_body_excerpt || '')
+          };
+          console.error(`${tracePrefix(runId, stepId, 'ERROR')} ${title} | ${Object.entries(details).map(([k,v])=>`${k}=${JSON.stringify(v)}`).join(', ')}`);
+        };
+        const logStart = (runId, stepId, title, meta={}) => {
+          console.time(`${runId}-step-${pad(stepId)}`);
+          console.log(`${tracePrefix(runId, stepId)} ${title} | phase=start, ${Object.entries(meta).map(([k,v])=>`${k}=${JSON.stringify(v)}`).join(', ')}`);
+        };
+        const logSuccess = (runId, stepId, title, meta={}) => {
+          console.timeEnd(`${runId}-step-${pad(stepId)}`);
+          console.log(`${tracePrefix(runId, stepId)} ${title} | phase=success, ${Object.entries(meta).map(([k,v])=>`${k}=${JSON.stringify(v)}`).join(', ')}`);
+        };
 
         const renderAppleDebug = (data) => {
           const appleDebug = data.apple_debug || null;
@@ -271,40 +222,176 @@ def _render_hr_merge_page() -> str:
 
         document.getElementById('previewForm').addEventListener('submit', async (e) => {
           e.preventDefault();
-          const fd = new FormData(e.target);
-          const res = await fetch('/api/tools/fit-hr-merge/preview', { method: 'POST', body: fd });
-          const data = await res.json();
-          if (data.import_token) {
-            importToken = data.import_token;
-            document.querySelector('#runForm input[name="import_token"]').value = importToken;
+          const runId = createRunId();
+          console.groupCollapsed(`[FIT-HR-Merge][PREVIEW][${runId}]`);
+          try {
+            logStart(runId, 1, 'UI input validation started');
+            const fitFile = e.target.querySelector('input[name="fit_file"]').files?.[0];
+            const appleFile = e.target.querySelector('input[name="apple_file"]').files?.[0];
+            if (!fitFile || !appleFile) throw new Error('Missing fit_file or apple_file');
+            logSuccess(runId, 1, 'UI input validation started', { fit_name: fitFile.name, apple_name: appleFile.name });
+            logStart(runId, 2, 'UI input validation passed');
+            logSuccess(runId, 2, 'UI input validation passed');
+            logStart(runId, 3, 'build FormData started');
+            const fd = new FormData(e.target);
+            logSuccess(runId, 3, 'build FormData started');
+            logStart(runId, 4, 'build FormData done (fit_name, apple_name, apple_source_type, sizes)', {
+              fit_name: fitFile.name, apple_name: appleFile.name, apple_source_type: fd.get('apple_source_type'),
+              fit_size: fitFile.size, apple_size: appleFile.size
+            });
+            fd.append('run_id', runId);
+            logSuccess(runId, 4, 'build FormData done (fit_name, apple_name, apple_source_type, sizes)');
+            logStart(runId, 5, 'send preview request started (endpoint, method)', { endpoint: '/api/tools/fit-hr-merge/preview', method: 'POST' });
+            const started = performance.now();
+            const res = await fetch('/api/tools/fit-hr-merge/preview', { method: 'POST', body: fd });
+            logSuccess(runId, 5, 'send preview request started (endpoint, method)');
+            logStart(runId, 6, 'preview response received (status, duration_ms)');
+            const rawBody = await res.text();
+            const durationMs = Math.round(performance.now() - started);
+            logSuccess(runId, 6, 'preview response received (status, duration_ms)', { status: res.status, duration_ms: durationMs });
+            logStart(runId, 7, 'preview response json parse started');
+            let data;
+            try { data = JSON.parse(rawBody || '{}'); } catch (err) { traceError(runId, 7, 'preview response json parse started', err, { http_status: res.status, response_body_excerpt: rawBody }); throw err; }
+            logSuccess(runId, 7, 'preview response json parse started');
+            logStart(runId, 8, 'preview response json parse done');
+            logSuccess(runId, 8, 'preview response json parse done', { trace_id: data.trace_id || null, run_id: data.run_id || runId });
+            if (!res.ok) throw new Error(data.error || `Preview failed with status ${res.status}`);
+            logStart(runId, 9, 'preview payload sanity check started');
+            if (!data.apple_summary || !data.fit_summary) throw new Error('Missing apple_summary or fit_summary in preview response');
+            logSuccess(runId, 9, 'preview payload sanity check started');
+            logStart(runId, 10, 'preview payload sanity check done (point_count, overlap, warnings_count)');
+            logSuccess(runId, 10, 'preview payload sanity check done (point_count, overlap, warnings_count)', {
+              point_count: data.apple_summary?.point_count ?? 0,
+              overlap: data.estimated_overlap_points ?? 0,
+              warnings_count: (data.warnings || []).length
+            });
+            logStart(runId, 11, 'apple_debug render started');
+            renderAppleDebug(data);
+            logSuccess(runId, 11, 'apple_debug render started');
+            logStart(runId, 12, 'apple_debug render done');
+            logSuccess(runId, 12, 'apple_debug render done');
+            if (data.import_token) {
+              importToken = data.import_token;
+              document.querySelector('#runForm input[name="import_token"]').value = importToken;
+            }
+            output.textContent = JSON.stringify(data, null, 2);
+            logStart(runId, 13, 'preview UI render done');
+            console.table([{run_id: runId, import_token: data.import_token || null, warnings: (data.warnings || []).length, point_count: data.apple_summary?.point_count ?? 0}]);
+            logSuccess(runId, 13, 'preview UI render done', { import_token: data.import_token || null });
+          } catch (error) {
+            traceError(runId, 13, 'preview UI render done', error);
+            output.textContent = `Preview error: ${error.message}`;
+          } finally {
+            console.groupEnd();
           }
-          renderAppleDebug(data);
-          output.textContent = JSON.stringify(data, null, 2);
         });
         document.getElementById('runForm').addEventListener('submit', async (e) => {
           e.preventDefault();
-          const form = new FormData(e.target);
-          const payload = {
-            import_token: form.get('import_token') || importToken,
-            overwrite_existing_hr: form.get('overwrite_existing_hr') === 'true',
-            ignore_implausible_hr: form.get('ignore_implausible_hr') !== 'false',
-            min_hr: Number(form.get('min_hr') || 30),
-            max_hr: Number(form.get('max_hr') || 240)
-          };
-          const res = await fetch('/api/tools/fit-hr-merge/run', {
-            method: 'POST',
-            headers: {'Content-Type':'application/json'},
-            body: JSON.stringify(payload)
-          });
-          const data = await res.json();
-          renderAppleDebug(data);
-          output.textContent = JSON.stringify(data, null, 2);
-          if (data.download_url) {
-            const a = document.createElement('a');
-            a.href = data.download_url;
-            a.textContent = 'Download merged output';
-            a.style.color = '#86efac';
-            output.parentNode.appendChild(a);
+          const runId = createRunId();
+          console.groupCollapsed(`[FIT-HR-Merge][RUN][${runId}]`);
+          try {
+            logStart(runId, 14, 'run form validation started');
+            const form = new FormData(e.target);
+            const token = form.get('import_token') || importToken;
+            if (!token) throw new Error('import_token missing: run preview first');
+            logSuccess(runId, 14, 'run form validation started', { import_token: token });
+            logStart(runId, 15, 'run form validation passed');
+            logSuccess(runId, 15, 'run form validation passed');
+            logStart(runId, 16, 'build run payload started');
+            const payload = {
+              run_id: runId,
+              import_token: token,
+              overwrite_existing_hr: form.get('overwrite_existing_hr') === 'true',
+              ignore_implausible_hr: form.get('ignore_implausible_hr') !== 'false',
+              min_hr: Number(form.get('min_hr') || 30),
+              max_hr: Number(form.get('max_hr') || 240)
+            };
+            logSuccess(runId, 16, 'build run payload started');
+            logStart(runId, 17, 'build run payload done (import_token, options)', {
+              import_token: payload.import_token,
+              options: { overwrite_existing_hr: payload.overwrite_existing_hr, ignore_implausible_hr: payload.ignore_implausible_hr, min_hr: payload.min_hr, max_hr: payload.max_hr}
+            });
+            logSuccess(runId, 17, 'build run payload done (import_token, options)');
+            logStart(runId, 18, 'send run request started');
+            const started = performance.now();
+            const res = await fetch('/api/tools/fit-hr-merge/run', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+            logSuccess(runId, 18, 'send run request started');
+            logStart(runId, 19, 'run response received (status, duration_ms)');
+            const rawBody = await res.text();
+            logSuccess(runId, 19, 'run response received (status, duration_ms)', { status: res.status, duration_ms: Math.round(performance.now() - started) });
+            logStart(runId, 20, 'run response json parse started');
+            let data;
+            try { data = JSON.parse(rawBody || '{}'); } catch (err) { traceError(runId, 20, 'run response json parse started', err, { http_status: res.status, response_body_excerpt: rawBody }); throw err; }
+            logSuccess(runId, 20, 'run response json parse started');
+            logStart(runId, 21, 'run response json parse done');
+            logSuccess(runId, 21, 'run response json parse done', { trace_id: data.trace_id || null, run_id: data.run_id || runId });
+            if (!res.ok) throw new Error(data.error || `Run failed with status ${res.status}`);
+            logStart(runId, 22, 'run report sanity check started');
+            if (!data.report) throw new Error('run response missing report');
+            logSuccess(runId, 22, 'run report sanity check started');
+            logStart(runId, 23, 'run report sanity check done (matched, written, patched, coverage, missing_after)');
+            const rpt = data.report || {};
+            logSuccess(runId, 23, 'run report sanity check done (matched, written, patched, coverage, missing_after)', {
+              matched: rpt.hr_points_matched ?? 0, written: rpt.hr_points_written ?? 0,
+              patched: rpt.fit_records_patched_in_binary ?? 0, coverage: rpt.coverage_pct ?? 0,
+              missing_after: rpt.records_missing_hr_after_merge ?? 0
+            });
+            renderAppleDebug(data);
+            output.textContent = JSON.stringify(data, null, 2);
+            logStart(runId, 24, 'download link render started');
+            if (data.download_url) {
+              const existing = document.getElementById('fitHrMergeDownloadLink');
+              if (existing) existing.remove();
+              const a = document.createElement('a');
+              a.id = 'fitHrMergeDownloadLink';
+              a.href = data.download_url;
+              a.textContent = 'Download merged output';
+              a.style.color = '#86efac';
+              a.dataset.filename = data.filename || 'merged_hr.fit';
+              a.addEventListener('click', async (evt) => {
+                evt.preventDefault();
+                const dlRunId = createRunId();
+                console.groupCollapsed(`[FIT-HR-Merge][DOWNLOAD][${dlRunId}]`);
+                try {
+                  logStart(dlRunId, 26, 'download started (artifact_token/url)', { artifact_token: data.artifact_token || null, url: data.download_url });
+                  const response = await fetch(data.download_url);
+                  logSuccess(dlRunId, 26, 'download started (artifact_token/url)');
+                  logStart(dlRunId, 27, 'download response received (status, content-length, content-type)');
+                  logSuccess(dlRunId, 27, 'download response received (status, content-length, content-type)', {
+                    status: response.status, content_length: response.headers.get('content-length') || null, content_type: response.headers.get('content-type') || null
+                  });
+                  if (!response.ok) throw new Error(`Download failed with status ${response.status}`);
+                  logStart(dlRunId, 28, 'blob creation started');
+                  const blob = await response.blob();
+                  logSuccess(dlRunId, 28, 'blob creation started');
+                  logStart(dlRunId, 29, 'blob creation done');
+                  logSuccess(dlRunId, 29, 'blob creation done', { blob_size: blob.size });
+                  const blobUrl = URL.createObjectURL(blob);
+                  const save = document.createElement('a');
+                  const filename = data.filename || 'merged_hr.fit';
+                  save.href = blobUrl;
+                  save.download = filename;
+                  logStart(dlRunId, 30, 'file save triggered (filename)', { filename });
+                  save.click();
+                  logSuccess(dlRunId, 30, 'file save triggered (filename)', { filename });
+                  setTimeout(() => URL.revokeObjectURL(blobUrl), 2000);
+                } catch (error) {
+                  traceError(dlRunId, 30, 'file save triggered (filename)', error);
+                } finally {
+                  console.groupEnd();
+                }
+              });
+              output.parentNode.appendChild(a);
+            }
+            logSuccess(runId, 24, 'download link render started', { artifact_token: data.artifact_token || null, filename: data.filename || null });
+            logStart(runId, 25, 'download link render done');
+            console.table([{ run_id: runId, artifact_token: data.artifact_token || null, written: data.report?.hr_points_written ?? 0, patched: data.report?.fit_records_patched_in_binary ?? 0 }]);
+            logSuccess(runId, 25, 'download link render done');
+          } catch (error) {
+            traceError(runId, 25, 'download link render done', error);
+            output.textContent = `Run error: ${error.message}`;
+          } finally {
+            console.groupEnd();
           }
         });
       </script>
@@ -397,13 +484,16 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         if self.path == "/api/tools/fit-hr-merge/preview":
+            trace_id = str(uuid4())
             form = cgi.FieldStorage(fp=self.rfile, headers=self.headers, environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": self.headers.get("Content-Type", "")})
             fit_item = form["fit_file"] if "fit_file" in form else None
             apple_item = form["apple_file"] if "apple_file" in form else None
             source_type = form.getfirst("apple_source_type", "auto")
+            run_id = form.getfirst("run_id", "") or str(uuid4())
             if fit_item is None or apple_item is None:
-                self._json(400, {"error": "Missing fit_file or apple_file"})
+                self._json(400, {"error": "Missing fit_file or apple_file", "trace_id": trace_id, "run_id": run_id})
                 return
+            started = perf_counter()
             try:
                 result = _handle_hr_merge_preview(
                     getattr(fit_item, "filename", ""),
@@ -412,30 +502,47 @@ class _Handler(BaseHTTPRequestHandler):
                     source_type,
                 )
             except (FitImportError, FitHrMergeError, ValueError) as exc:
-                self._json(400, {"error": str(exc)})
+                self._json(400, {"error": str(exc), "trace_id": trace_id, "run_id": run_id})
                 return
+            result["trace_id"] = trace_id
+            result["run_id"] = run_id
+            result["timing_ms"] = {
+                **result.get("timing_ms", {}),
+                "http_handler_total": round((perf_counter() - started) * 1000, 3),
+            }
             self._json(200, result)
             return
 
         if self.path == "/api/tools/fit-hr-merge/run":
+            trace_id = str(uuid4())
             raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
             try:
                 payload = json.loads(raw or b"{}")
             except json.JSONDecodeError:
-                self._json(400, {"error": "Invalid JSON body"})
+                self._json(400, {"error": "Invalid JSON body", "trace_id": trace_id})
                 return
             if not isinstance(payload, dict):
-                self._json(400, {"error": "JSON body must be an object"})
+                self._json(400, {"error": "JSON body must be an object", "trace_id": trace_id})
                 return
+            run_id = payload.get("run_id", "") or str(uuid4())
+            started = perf_counter()
             try:
                 options = parse_merge_options(payload)
                 result = _run_hr_merge(payload.get("import_token", ""), options)
             except KeyError:
-                self._json(404, {"error": "Unknown or expired import token"})
+                self._json(404, {"error": "Unknown or expired import token", "trace_id": trace_id, "run_id": run_id})
                 return
             except (FitHrMergeError, FitImportError, ValueError) as exc:
-                self._json(400, {"error": str(exc)})
+                self._json(400, {"error": str(exc), "trace_id": trace_id, "run_id": run_id})
                 return
+            result["trace_id"] = trace_id
+            result["run_id"] = run_id
+            if result.get("artifact_token"):
+                result["filename"] = _load_merged_artifact(result["artifact_token"]).get("filename")
+            result["timing_ms"] = {
+                **result.get("timing_ms", {}),
+                "http_handler_total": round((perf_counter() - started) * 1000, 3),
+            }
             self._json(200, result)
             return
 

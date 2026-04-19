@@ -164,7 +164,10 @@ def test_api_merge_run_rejects_non_object_json_body():
     with patch.object(handler, "_json") as send_json:
         handler.do_POST()
 
-    send_json.assert_called_once_with(400, {"error": "JSON body must be an object"})
+    args = send_json.call_args.args
+    assert args[0] == 400
+    assert args[1]["error"] == "JSON body must be an object"
+    assert "trace_id" in args[1]
 
 
 def test_api_merge_run_parses_string_boolean_flags():
@@ -180,13 +183,18 @@ def test_api_merge_run_parses_string_boolean_flags():
     with (
         patch.object(handler, "_json") as send_json,
         patch("webapp._run_hr_merge", return_value={"ok": True}) as run_merge,
+        patch("webapp._load_merged_artifact", return_value={"filename": "merged.fit"}),
     ):
         handler.do_POST()
 
     options = run_merge.call_args.args[1]
     assert options.overwrite_existing_hr is False
     assert options.ignore_implausible_hr is False
-    send_json.assert_called_once_with(200, {"ok": True})
+    args = send_json.call_args.args
+    assert args[0] == 200
+    assert args[1]["ok"] is True
+    assert "trace_id" in args[1]
+    assert "run_id" in args[1]
 
 
 def test_api_merge_run_ignores_obsolete_strategy_and_tolerance_options():
@@ -202,13 +210,18 @@ def test_api_merge_run_ignores_obsolete_strategy_and_tolerance_options():
     with (
         patch.object(handler, "_json") as send_json,
         patch("webapp._run_hr_merge", return_value={"ok": True}) as run_merge,
+        patch("webapp._load_merged_artifact", return_value={"filename": "merged.fit"}),
     ):
         handler.do_POST()
 
     options = run_merge.call_args.args[1]
     assert not hasattr(options, "matching_strategy")
     assert not hasattr(options, "tolerance_seconds")
-    send_json.assert_called_once_with(200, {"ok": True})
+    args = send_json.call_args.args
+    assert args[0] == 200
+    assert args[1]["ok"] is True
+    assert "trace_id" in args[1]
+    assert "run_id" in args[1]
 
 
 def test_run_hr_merge_includes_apple_debug_in_response():
@@ -230,15 +243,17 @@ def test_run_hr_merge_includes_apple_debug_in_response():
 
 
 def test_hr_merge_preview_with_json_yields_points_and_overlap():
-    fit_summary = {
-        "start_time": "2026-04-11T07:00:00Z",
-        "end_time": "2026-04-11T08:00:00Z",
-        "sample_count": 4,
-        "has_existing_hr": False,
-    }
     with patch(
-        "webapp.parse_fit_records_for_merge",
-        return_value={"records": [{"timestamp": "2026-04-11T07:00:10Z", "hr": None}], "summary": fit_summary},
+        "webapp.preview_merge",
+        return_value=(
+            {"fit_filename": "ride.fit", "fit_bytes": b"fit-bytes", "fit_records": [{"timestamp": "2026-04-11T07:00:10Z", "hr": None}], "apple_raw": [{"timestamp": "2026-04-11T07:00:10Z", "hr": 120}]},
+            {
+                "apple_debug": {"detected_source_type": "json", "parser_mode": "json", "raw_heart_rate_entries_found": 2},
+                "apple_summary": {"point_count": 2},
+                "fit_summary": {"sample_count": 4},
+                "estimated_overlap_points": 2,
+            },
+        ),
     ):
         result = webapp._handle_hr_merge_preview(
             "ride.fit",
@@ -270,4 +285,20 @@ def test_api_merge_run_returns_400_when_binary_patch_fails_after_write():
     ):
         handler.do_POST()
 
-    send_json.assert_called_once_with(400, {"error": "patched 0 FIT records"})
+    args = send_json.call_args.args
+    assert args[0] == 400
+    assert args[1]["error"] == "patched 0 FIT records"
+    assert "trace_id" in args[1]
+    assert "run_id" in args[1]
+
+
+def test_browser_logging_smoke_contains_step_sequence_and_console_apis():
+    html = webapp._render_hr_merge_page()
+    assert "tracePrefix" in html
+    assert "logStart(runId, 1" in html
+    assert "logStart(runId, 14" in html
+    assert "logStart(dlRunId, 26" in html
+    assert "console.groupCollapsed" in html
+    assert "console.table" in html
+    assert "console.time(" in html
+    assert "console.timeEnd(" in html
