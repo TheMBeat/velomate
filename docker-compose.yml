@@ -33,7 +33,10 @@ services:
       VELOMATE_RESET_RIDE_FTP: ${VELOMATE_RESET_RIDE_FTP:-0}
       VELOMATE_BACKFILL_MONTHS: ${VELOMATE_BACKFILL_MONTHS:-12}
       POLL_INTERVAL_MINUTES: 10
+      WEB_PORT: 8080
       PYTHONUNBUFFERED: "1"
+    ports:
+      - "0.0.0.0:8880:8080"
     depends_on:
       velomate-postgres:
         condition: service_healthy

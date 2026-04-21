@@ -9,6 +9,7 @@ import pytest
 # Mock DB and external deps before importing ingestor modules
 sys.modules.setdefault("psycopg2", MagicMock())
 sys.modules.setdefault("psycopg2.extras", MagicMock())
+sys.modules.setdefault("fitparse", MagicMock())
 sys.modules.setdefault("requests", MagicMock())
 sys.modules.setdefault("schedule", MagicMock())
 
@@ -380,3 +381,30 @@ class TestGetHealthyConnN1:
 
         bad_conn.close.assert_called_once()
         assert result is None
+
+
+class TestRunWithoutStrava:
+    def test_run_skips_strava_when_credentials_missing(self, monkeypatch):
+        monkeypatch.delenv("STRAVA_CLIENT_ID", raising=False)
+        monkeypatch.delenv("STRAVA_CLIENT_SECRET", raising=False)
+        monkeypatch.delenv("STRAVA_REFRESH_TOKEN", raising=False)
+
+        mock_conn = MagicMock()
+
+        with (
+            patch("main.get_connection", return_value=mock_conn),
+            patch("main.create_schema"),
+            patch("main.get_sync_state", return_value=None),
+            patch("main.set_sync_state"),
+            patch("main.schedule.every"),
+            patch("main.Thread") as mock_thread,
+            patch("main.run_server") as run_server,
+            patch("main.run_backfill") as run_backfill,
+            patch("main.poll_strava") as poll_strava,
+        ):
+            ingestor_main.run()
+
+        run_backfill.assert_not_called()
+        poll_strava.assert_not_called()
+        mock_thread.assert_called_once()
+        run_server.assert_called_once()
