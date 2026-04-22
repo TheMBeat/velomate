@@ -116,39 +116,97 @@ def _import_merged_artifact(artifact_token: str) -> dict:
 
 def _render_upload_page() -> str:
     return """
-    <html><head><title>VeloMate FIT Import</title>
+    <html><head><title>VeloMate</title>
     <style>
-      body{background:#111827;color:#e5e7eb;font-family:Arial}
-      .card{max-width:760px;margin:32px auto;background:#1f2937;border-radius:12px;padding:24px}
-      .btn{background:#2563eb;color:#fff;border:0;border-radius:8px;padding:10px 16px}
-      .btn-danger{background:#dc2626}
-      input{background:#111827;color:#e5e7eb;border:1px solid #374151;border-radius:6px;padding:8px}
+      :root{--bg:#0f172a;--card:#1e293b;--muted:#94a3b8;--text:#e2e8f0;--line:#334155;--blue:#2563eb;--green:#16a34a;--red:#dc2626}
+      *{box-sizing:border-box}
+      body{margin:0;background:linear-gradient(160deg,#0b1220 0%,#0f172a 100%);color:var(--text);font-family:Arial,sans-serif}
+      .shell{max-width:980px;margin:24px auto;padding:0 16px}
+      .nav{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}
+      .chip{display:inline-block;padding:7px 10px;background:#111827;border:1px solid var(--line);border-radius:999px;color:var(--muted);font-size:12px}
+      .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px}
+      .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px}
+      .hero{padding:20px;margin-bottom:16px}
+      h1,h2,h3{margin:0 0 10px 0}
+      p{margin:0 0 14px 0;color:var(--muted);line-height:1.45}
+      .btn{cursor:pointer;background:var(--blue);color:#fff;border:0;border-radius:9px;padding:10px 14px;font-weight:600}
+      .btn-danger{background:var(--red)}
+      .btn:disabled{opacity:.65;cursor:not-allowed}
+      input{width:100%;background:#0f172a;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:10px}
+      .status{display:none;margin-top:12px;padding:10px;border:1px solid var(--line);border-radius:10px;background:#0f172a}
+      .status.active{display:block}
+      .spinner{width:16px;height:16px;display:inline-block;border:2px solid #1d4ed8;border-top-color:#bfdbfe;border-radius:50%;animation:spin 1s linear infinite;margin-right:8px}
+      .progress{margin-top:10px;height:6px;background:#111827;border-radius:8px;overflow:hidden}
+      .progress > span{display:block;height:100%;width:35%;background:linear-gradient(90deg,#1d4ed8,#60a5fa);animation:slide 1.4s ease-in-out infinite}
+      .success{color:#86efac}
+      .danger{color:#fca5a5}
+      pre{white-space:pre-wrap;background:#0f172a;border:1px solid var(--line);padding:12px;border-radius:8px;margin-top:8px}
+      @keyframes spin{to{transform:rotate(360deg)}}
+      @keyframes slide{0%{transform:translateX(-120%)}100%{transform:translateX(360%)}}
     </style>
-    </head><body><div class='card'>
-    <h1>Import FIT file</h1>
-    <form action='/imports/fit/preview' method='post' enctype='multipart/form-data'>
-      <input type='file' name='file' accept='.fit' required/><br/><br/>
-      <button class='btn' type='submit'>Upload & Preview</button>
-    </form>
-
-    <p><a href='/tools/fit-hr-merge' style='color:#93c5fd'>Open Apple HR + FIT merger tool</a></p>
-
-    <hr style='border-color:#374151;margin:24px 0' />
-
-    <h2>Delete imported activity</h2>
-    <form id='deleteForm'>
-      <input type='number' name='activity_id' placeholder='Activity ID' min='1' required />
-      <button class='btn btn-danger' type='submit'>Delete activity</button>
-    </form>
-    <pre id='deleteOutput' style='white-space:pre-wrap;background:#111827;border:1px solid #374151;padding:12px;border-radius:8px;margin-top:12px;'></pre>
+    </head><body><div class='shell'>
+      <div class='card hero'>
+        <h1>VeloMate</h1>
+        <p>Import, merge und verwalte FIT-Aktivitäten in einem konsistenten Workflow.</p>
+        <div class='nav'>
+          <span class='chip'>Übersicht (geplant)</span>
+          <span class='chip'>Import</span>
+          <span class='chip'>Merge</span>
+          <span class='chip'>Aktivitäten</span>
+          <span class='chip'>Analyse / Grafana (später)</span>
+        </div>
+      </div>
+      <div class='grid'>
+        <section class='card'>
+          <h2>FIT importieren</h2>
+          <p>Datei wählen, Vorschau prüfen, danach importieren.</p>
+          <form action='/imports/fit/preview' method='post' enctype='multipart/form-data'>
+            <input type='file' name='file' accept='.fit' required/><br/><br/>
+            <button class='btn' type='submit'>Datei auswählen & Vorschau</button>
+          </form>
+        </section>
+        <section class='card'>
+          <h2>Apple HR + FIT mergen</h2>
+          <p>Heart-Rate aus Apple exportieren und direkt in FIT einfügen.</p>
+          <a href='/tools/fit-hr-merge' class='btn' style='display:inline-block;text-decoration:none'>Merge-Tool öffnen</a>
+        </section>
+        <section class='card'>
+          <h2>Aktivität löschen</h2>
+          <p>Aktivität-ID eingeben, bestätigen und sicher löschen.</p>
+          <form id='deleteForm'>
+            <input type='number' name='activity_id' placeholder='Activity ID' min='1' required />
+            <div style='margin-top:10px'>
+              <button id='deleteBtn' class='btn btn-danger' type='submit'>Delete activity</button>
+            </div>
+          </form>
+          <div id='deleteStatus' class='status'>
+            <div><span class='spinner'></span><strong id='deleteStatusText'>Löschen wird vorbereitet</strong></div>
+            <div class='progress'><span></span></div>
+          </div>
+          <pre id='deleteOutput'>Noch kein Löschvorgang gestartet.</pre>
+        </section>
+      </div>
 
     <script>
+      const deleteForm = document.getElementById('deleteForm');
+      const deleteBtn = document.getElementById('deleteBtn');
+      const deleteStatus = document.getElementById('deleteStatus');
+      const deleteStatusText = document.getElementById('deleteStatusText');
+      const deleteOutput = document.getElementById('deleteOutput');
+
+      const setDeleteLoading = (active, message='') => {
+        deleteBtn.disabled = active;
+        deleteStatus.classList.toggle('active', active);
+        if (message) deleteStatusText.textContent = message;
+      };
+
       document.getElementById('deleteForm').addEventListener('submit', async (e) => {
         e.preventDefault();
-        const output = document.getElementById('deleteOutput');
+        const fd = new FormData(deleteForm);
+        const activityId = Number(fd.get('activity_id'));
+        if (!confirm(`Aktivität ${activityId} wirklich löschen?`)) return;
         try {
-          const fd = new FormData(e.target);
-          const activityId = Number(fd.get('activity_id'));
+          setDeleteLoading(true, 'Aktivität wird gelöscht');
           const res = await fetch('/api/activities/delete', {
             method: 'POST',
             headers: {'Content-Type':'application/json'},
@@ -156,9 +214,11 @@ def _render_upload_page() -> str:
           });
           const data = await res.json();
           if (!res.ok) throw new Error(data.error || `Delete failed with status ${res.status}`);
-          output.textContent = JSON.stringify(data, null, 2);
+          deleteOutput.innerHTML = `<span class="success">Erfolgreich gelöscht: Activity ${data.activity_id}</span>\\n\\n` + JSON.stringify(data, null, 2);
         } catch (error) {
-          output.textContent = `Delete error: ${error.message}`;
+          deleteOutput.innerHTML = `<span class="danger">Delete error: ${error.message}</span>`;
+        } finally {
+          setDeleteLoading(false);
         }
       });
     </script>
@@ -170,25 +230,41 @@ def _render_hr_merge_page() -> str:
     return """
     <html><head><title>VeloMate Apple HR + FIT Merger</title>
     <style>
-      body{background:#111827;color:#e5e7eb;font-family:Arial;margin:0;padding:20px}
-      .card{max-width:920px;margin:20px auto;background:#1f2937;border-radius:12px;padding:20px}
-      .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-      .btn{background:#2563eb;color:#fff;border:0;border-radius:8px;padding:10px 14px;margin-top:10px;margin-right:8px}
-      .btn-secondary{background:#059669}
-      .btn-danger{background:#dc2626}
-      .muted{color:#9ca3af}
+      :root{--bg:#0f172a;--card:#1e293b;--line:#334155;--text:#e2e8f0;--muted:#94a3b8;--blue:#2563eb;--green:#16a34a;--red:#dc2626}
+      *{box-sizing:border-box}
+      body{background:linear-gradient(160deg,#0b1220 0%,#0f172a 100%);color:var(--text);font-family:Arial,sans-serif;margin:0;padding:20px}
+      .card{max-width:980px;margin:16px auto;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px}
+      .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px}
+      .btn{cursor:pointer;background:var(--blue);color:#fff;border:0;border-radius:8px;padding:10px 14px;margin-top:10px;margin-right:8px;font-weight:600}
+      .btn-secondary{background:var(--green)}
+      .btn-danger{background:var(--red)}
+      .btn:disabled{opacity:.65;cursor:not-allowed}
+      .muted{color:var(--muted)}
       .success{color:#86efac}
-      .debug-panel{margin-top:12px;border:1px solid #374151;border-radius:8px;background:#111827}
+      .danger{color:#fca5a5}
+      .debug-panel{margin-top:12px;border:1px solid var(--line);border-radius:8px;background:#0f172a}
       .debug-panel summary{cursor:pointer;padding:10px 12px;font-weight:600}
       .debug-panel pre{margin:0 12px 12px 12px}
-      input,select{background:#111827;color:#e5e7eb;border:1px solid #374151;border-radius:6px;padding:6px}
-      pre{white-space:pre-wrap;background:#111827;border:1px solid #374151;padding:12px;border-radius:8px}
+      input,select{width:100%;background:#0f172a;color:var(--text);border:1px solid var(--line);border-radius:6px;padding:8px}
+      pre{white-space:pre-wrap;background:#0f172a;border:1px solid var(--line);padding:12px;border-radius:8px}
+      .summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-top:12px}
+      .metric{background:#0f172a;border:1px solid var(--line);padding:10px;border-radius:10px}
+      .metric .label{display:block;color:var(--muted);font-size:12px;margin-bottom:4px}
+      .metric .value{font-size:16px;font-weight:700}
+      .status{display:none;margin:12px 0;padding:12px;border:1px solid var(--line);background:#0f172a;border-radius:10px}
+      .status.active{display:block}
+      .spinner{width:16px;height:16px;display:inline-block;border:2px solid #1d4ed8;border-top-color:#bfdbfe;border-radius:50%;animation:spin 1s linear infinite;margin-right:8px;vertical-align:-3px}
+      .progress{margin-top:10px;height:6px;background:#111827;border-radius:8px;overflow:hidden}
+      .progress > span{display:block;height:100%;width:35%;background:linear-gradient(90deg,#1d4ed8,#60a5fa);animation:slide 1.4s ease-in-out infinite}
       #actions{margin-top:12px}
+      @keyframes spin{to{transform:rotate(360deg)}}
+      @keyframes slide{0%{transform:translateX(-120%)}100%{transform:translateX(360%)}}
     </style>
     </head><body>
       <div class='card'>
         <h1>Apple HR + FIT Merger</h1>
-        <p class='muted'>FIT timeline is master. Apple heart rate is mapped to existing FIT timestamps only.</p>
+        <p class='muted'>Ablauf: Datei wählen → Preview → Merge → Import. FIT-Timeline bleibt führend.</p>
+        <p><a href='/imports/fit' style='color:#93c5fd'>← zurück zur Startseite</a></p>
         <form id='previewForm'>
           <div class='grid'>
             <div><label>FIT file</label><br/><input type='file' name='fit_file' accept='.fit' required/></div>
@@ -201,6 +277,10 @@ def _render_hr_merge_page() -> str:
           </select>
           <button class='btn' type='submit'>Preview</button>
         </form>
+        <div id='previewStatus' class='status'>
+          <div><span class='spinner'></span><strong id='previewStatusText'>FIT wird gelesen</strong></div>
+          <div class='progress'><span></span></div>
+        </div>
         <hr style='border-color:#374151'/>
         <form id='runForm'>
           <input type='hidden' name='import_token' />
@@ -209,8 +289,17 @@ def _render_hr_merge_page() -> str:
             <div><label>Ignore implausible HR</label><br/><select name='ignore_implausible_hr'><option value='true'>Yes</option><option value='false'>No</option></select></div>
             <div><label>HR min / max</label><br/><input type='number' name='min_hr' value='30' min='1' max='240'/> <input type='number' name='max_hr' value='240' min='60' max='260'/></div>
           </div>
-          <button class='btn' type='submit'>Run Merge</button>
+          <button id='runBtn' class='btn' type='submit'>Run Merge</button>
         </form>
+        <div id='runStatus' class='status'>
+          <div><span class='spinner'></span><strong id='runStatusText'>Daten werden zusammengeführt</strong></div>
+          <div class='progress'><span></span></div>
+        </div>
+        <div id='importStatus' class='status'>
+          <div><span class='spinner'></span><strong id='importStatusText'>FIT wird gelesen</strong></div>
+          <div class='progress'><span></span></div>
+        </div>
+        <div id='summary' class='summary'></div>
         <div id='actions'></div>
         <details id='appleDebugPanel' class='debug-panel'>
           <summary>Apple Parse Debug</summary>
@@ -227,8 +316,28 @@ def _render_hr_merge_page() -> str:
         const appleDebugOutput = document.getElementById('appleDebugOutput');
         const appleDebugPanel = document.getElementById('appleDebugPanel');
         const actions = document.getElementById('actions');
+        const summary = document.getElementById('summary');
+        const previewStatus = document.getElementById('previewStatus');
+        const previewStatusText = document.getElementById('previewStatusText');
+        const runStatus = document.getElementById('runStatus');
+        const runStatusText = document.getElementById('runStatusText');
+        const importStatus = document.getElementById('importStatus');
+        const importStatusText = document.getElementById('importStatusText');
+        const previewButton = document.querySelector('#previewForm button[type="submit"]');
+        const runButton = document.getElementById('runBtn');
 
         const clearActions = () => { actions.innerHTML = ''; };
+        const clearSummary = () => { summary.innerHTML = ''; };
+        const renderMetric = (label, value) =>
+          `<div class="metric"><span class="label">${label}</span><span class="value">${value ?? '—'}</span></div>`;
+        const setLoading = (section, active, message='') => {
+          section.classList.toggle('active', active);
+          if (message) {
+            if (section === previewStatus) previewStatusText.textContent = message;
+            if (section === runStatus) runStatusText.textContent = message;
+            if (section === importStatus) importStatusText.textContent = message;
+          }
+        };
 
         const renderAppleDebug = (data) => {
           const appleDebug = data.apple_debug || null;
@@ -247,6 +356,7 @@ def _render_hr_merge_page() -> str:
           deleteBtn.textContent = `Delete activity ${activityId}`;
 
           deleteBtn.addEventListener('click', async () => {
+            if (!confirm(`Aktivität ${activityId} wirklich löschen?`)) return;
             try {
               const res = await fetch('/api/activities/delete', {
                 method: 'POST',
@@ -262,6 +372,45 @@ def _render_hr_merge_page() -> str:
           });
 
           actions.appendChild(deleteBtn);
+        };
+
+        const renderPreviewSummary = (data) => {
+          clearSummary();
+          const p = data.preview || {};
+          summary.innerHTML = [
+            renderMetric('Start', p.start_time || '—'),
+            renderMetric('Dauer (s)', p.duration_s),
+            renderMetric('Distanz (m)', p.distance_m),
+            renderMetric('Samples', p.sample_count),
+            renderMetric('Apple HR Punkte', data.apple_points_total),
+            renderMetric('Apple Quelle', data.apple_source_type || 'auto')
+          ].join('');
+        };
+
+        const renderRunSummary = (data) => {
+          clearSummary();
+          const r = data.report || {};
+          summary.innerHTML = [
+            renderMetric('HR-Punkte geschrieben', r.hr_points_written),
+            renderMetric('Coverage', r.coverage_ratio),
+            renderMetric('Calories', r.calories_applied),
+            renderMetric('Temperatur', r.temperature_applied),
+            renderMetric('Output', data.filename || 'merged.fit'),
+            renderMetric('Trace', data.trace_id || '—')
+          ].join('');
+        };
+
+        const renderImportSummary = (data) => {
+          clearSummary();
+          const p = data.preview || {};
+          summary.innerHTML = [
+            renderMetric('Activity-ID', data.activity_id),
+            renderMetric('Distanz (m)', p.distance_m),
+            renderMetric('Dauer (s)', p.duration_s),
+            renderMetric('Höhenmeter (m)', p.total_ascent_m),
+            renderMetric('Samples', data.sample_count),
+            renderMetric('Datei', data.filename)
+          ].join('');
         };
 
         const renderActions = (data) => {
@@ -286,18 +435,26 @@ def _render_hr_merge_page() -> str:
 
           importBtn.addEventListener('click', async () => {
             try {
+              importBtn.disabled = true;
+              setLoading(importStatus, true, 'FIT wird gelesen');
               const res = await fetch('/api/tools/fit-hr-merge/import', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ artifact_token: artifactToken })
               });
+              importStatusText.textContent = 'Aktivität wird gespeichert';
               const data = await res.json();
               if (!res.ok) throw new Error(data.error || `Import failed with status ${res.status}`);
-              output.textContent = JSON.stringify(data, null, 2);
+              importStatusText.textContent = 'Streams werden geschrieben';
+              output.innerHTML = `<span class="success">Import erfolgreich.</span>\\n\\n` + JSON.stringify(data, null, 2);
               importedActivityId = data.activity_id;
+              renderImportSummary(data);
               renderDeleteButton(importedActivityId);
             } catch (error) {
-              output.textContent = `Import error: ${error.message}`;
+              output.innerHTML = `<span class="danger">Import error: ${error.message}</span>`;
+            } finally {
+              setLoading(importStatus, false);
+              importBtn.disabled = false;
             }
           });
 
@@ -307,14 +464,19 @@ def _render_hr_merge_page() -> str:
         document.getElementById('previewForm').addEventListener('submit', async (e) => {
           e.preventDefault();
           clearActions();
+          clearSummary();
           artifactToken = null;
           importedActivityId = null;
 
           try {
+            previewButton.disabled = true;
+            setLoading(previewStatus, true, 'FIT wird gelesen');
             const fd = new FormData(e.target);
             const res = await fetch('/api/tools/fit-hr-merge/preview', { method: 'POST', body: fd });
+            previewStatusText.textContent = 'Apple-Daten werden analysiert';
             const data = await res.json();
             if (!res.ok) throw new Error(data.error || `Preview failed with status ${res.status}`);
+            previewStatusText.textContent = 'Vorschau wird erstellt';
 
             if (data.import_token) {
               importToken = data.import_token;
@@ -322,9 +484,13 @@ def _render_hr_merge_page() -> str:
             }
 
             renderAppleDebug(data);
+            renderPreviewSummary(data);
             output.textContent = JSON.stringify(data, null, 2);
           } catch (error) {
-            output.textContent = `Preview error: ${error.message}`;
+            output.innerHTML = `<span class="danger">Preview error: ${error.message}</span>`;
+          } finally {
+            setLoading(previewStatus, false);
+            previewButton.disabled = false;
           }
         });
 
@@ -333,6 +499,8 @@ def _render_hr_merge_page() -> str:
           clearActions();
 
           try {
+            runButton.disabled = true;
+            setLoading(runStatus, true, 'Daten werden zusammengeführt');
             const form = new FormData(e.target);
             const token = form.get('import_token') || importToken;
             if (!token) throw new Error('import_token missing: run preview first');
@@ -350,14 +518,20 @@ def _render_hr_merge_page() -> str:
               headers: {'Content-Type':'application/json'},
               body: JSON.stringify(payload)
             });
+            runStatusText.textContent = 'Herzfrequenz wird interpoliert';
             const data = await res.json();
             if (!res.ok) throw new Error(data.error || `Run failed with status ${res.status}`);
+            runStatusText.textContent = 'FIT wird geschrieben';
 
             renderAppleDebug(data);
+            renderRunSummary(data);
             output.textContent = JSON.stringify(data, null, 2);
             renderActions(data);
           } catch (error) {
-            output.textContent = `Run error: ${error.message}`;
+            output.innerHTML = `<span class="danger">Run error: ${error.message}</span>`;
+          } finally {
+            setLoading(runStatus, false);
+            runButton.disabled = false;
           }
         });
       </script>
@@ -367,21 +541,38 @@ def _render_hr_merge_page() -> str:
 
 def _render_preview_page(token: str, preview: dict) -> str:
     return f"""
-    <html><body style='background:#111827;color:#e5e7eb;font-family:Arial;'>
-    <div style='max-width:760px;margin:32px auto;background:#1f2937;border-radius:12px;padding:24px;'>
-    <h2>Preview: {preview['source_file_name']}</h2>
-    <ul>
-      <li>Start: {preview['start_time']}</li><li>End: {preview['end_time']}</li>
-      <li>Duration (s): {preview['duration_s']}</li><li>Distance (m): {preview['distance_m']}</li>
-      <li>GPS: {preview['has_gps_track']}</li><li>Speed: {preview['has_speed']}</li>
-      <li>Cadence: {preview['has_cadence']}</li><li>Power: {preview['has_power']}</li>
-      <li>Heart rate: {preview['has_heart_rate']}</li><li>Samples: {preview['sample_count']}</li>
-    </ul>
-    <form action='/imports/fit/confirm' method='post'>
-      <input type='hidden' name='import_token' value='{token}' />
-      <button style='background:#2563eb;color:#fff;border:0;border-radius:8px;padding:10px 16px;' type='submit'>Confirm Import</button>
-    </form>
-    </div></body></html>
+    <html><body style='margin:0;background:#0f172a;color:#e2e8f0;font-family:Arial,sans-serif'>
+    <div style='max-width:840px;margin:24px auto;padding:0 16px;'>
+      <div style='background:#1e293b;border:1px solid #334155;border-radius:14px;padding:20px'>
+        <h2 style='margin-top:0'>FIT Preview: {preview['source_file_name']}</h2>
+        <p style='color:#94a3b8'>Schritt 2/3: Vorschau prüfen und Import bestätigen.</p>
+        <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px'>
+          <div style='background:#0f172a;border:1px solid #334155;border-radius:10px;padding:10px'><small style='color:#94a3b8'>Start</small><div>{preview['start_time']}</div></div>
+          <div style='background:#0f172a;border:1px solid #334155;border-radius:10px;padding:10px'><small style='color:#94a3b8'>Ende</small><div>{preview['end_time']}</div></div>
+          <div style='background:#0f172a;border:1px solid #334155;border-radius:10px;padding:10px'><small style='color:#94a3b8'>Dauer (s)</small><div>{preview['duration_s']}</div></div>
+          <div style='background:#0f172a;border:1px solid #334155;border-radius:10px;padding:10px'><small style='color:#94a3b8'>Distanz (m)</small><div>{preview['distance_m']}</div></div>
+          <div style='background:#0f172a;border:1px solid #334155;border-radius:10px;padding:10px'><small style='color:#94a3b8'>Höhenmeter (m)</small><div>{preview.get('total_ascent_m', '—')}</div></div>
+          <div style='background:#0f172a;border:1px solid #334155;border-radius:10px;padding:10px'><small style='color:#94a3b8'>Samples</small><div>{preview['sample_count']}</div></div>
+        </div>
+        <details style='margin-top:12px;border:1px solid #334155;border-radius:10px;padding:8px 12px;background:#0f172a'>
+          <summary style='cursor:pointer'>Optional: Debug JSON</summary>
+          <pre style='white-space:pre-wrap'>{json.dumps(preview, indent=2)}</pre>
+        </details>
+        <form action='/imports/fit/confirm' method='post' style='margin-top:14px'>
+          <input type='hidden' name='import_token' value='{token}' />
+          <button id='confirmBtn' style='background:#2563eb;color:#fff;border:0;border-radius:8px;padding:10px 16px;font-weight:600' type='submit'>Jetzt importieren</button>
+          <span id='loading' style='display:none;margin-left:8px;color:#93c5fd'>Import läuft…</span>
+        </form>
+      </div>
+    </div>
+    <script>
+      const form = document.querySelector('form[action="/imports/fit/confirm"]');
+      form.addEventListener('submit', () => {{
+        document.getElementById('confirmBtn').disabled = true;
+        document.getElementById('loading').style.display = 'inline';
+      }});
+    </script>
+    </body></html>
     """
 
 
@@ -607,14 +798,33 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(200, {"status": "imported", "activity_id": activity_id, "sample_count": sample_count})
             else:
                 html = f"""
-                <body style='background:#111827;color:#86efac;font-family:Arial;padding:30px;'>
-                  <h2>Import complete</h2>
-                  <p>Activity {activity_id} saved ({sample_count} samples).</p>
-                  <form method="post" action="/api/activities/delete" onsubmit="event.preventDefault(); fetch('/api/activities/delete', {{method:'POST', headers:{{'Content-Type':'application/json'}}, body:JSON.stringify({{activity_id:{activity_id}}})}}).then(r=>r.json()).then(d=>document.getElementById('deleteResult').textContent=JSON.stringify(d,null,2)).catch(e=>document.getElementById('deleteResult').textContent=e.message);">
-                    <button style='background:#dc2626;color:#fff;border:0;border-radius:8px;padding:10px 16px;' type='submit'>Delete this activity</button>
-                  </form>
-                  <pre id="deleteResult" style="white-space:pre-wrap;background:#111827;border:1px solid #374151;padding:12px;border-radius:8px;margin-top:12px;"></pre>
-                  <p><a href='/imports/fit'>Import another file</a></p>
+                <body style='margin:0;background:#0f172a;color:#e2e8f0;font-family:Arial,sans-serif;padding:24px;'>
+                  <div style='max-width:760px;margin:0 auto;background:#1e293b;border:1px solid #334155;border-radius:14px;padding:20px;'>
+                    <h2 style='color:#86efac;margin-top:0'>Import complete</h2>
+                    <p>Activity <strong>{activity_id}</strong> gespeichert ({sample_count} Samples).</p>
+                    <div style='display:flex;gap:10px;flex-wrap:wrap;margin-top:12px'>
+                      <a href='/imports/fit' style='display:inline-block;background:#2563eb;color:#fff;text-decoration:none;border-radius:8px;padding:10px 14px;font-weight:600'>Weiterer Import</a>
+                      <button id='deleteBtn' style='background:#dc2626;color:#fff;border:0;border-radius:8px;padding:10px 16px;font-weight:600' type='button'>Diese Aktivität löschen</button>
+                    </div>
+                    <pre id="deleteResult" style="white-space:pre-wrap;background:#0f172a;border:1px solid #334155;padding:12px;border-radius:8px;margin-top:12px;">Noch kein Löschvorgang gestartet.</pre>
+                  </div>
+                  <script>
+                    document.getElementById('deleteBtn').addEventListener('click', async () => {{
+                      if (!confirm('Aktivität {activity_id} wirklich löschen?')) return;
+                      try {{
+                        const r = await fetch('/api/activities/delete', {{
+                          method: 'POST',
+                          headers: {{'Content-Type':'application/json'}},
+                          body: JSON.stringify({{activity_id:{activity_id}}})
+                        }});
+                        const d = await r.json();
+                        if (!r.ok) throw new Error(d.error || 'Delete failed');
+                        document.getElementById('deleteResult').textContent = 'Erfolgreich gelöscht: Activity {activity_id}\\n\\n' + JSON.stringify(d, null, 2);
+                      }} catch (e) {{
+                        document.getElementById('deleteResult').textContent = 'Delete error: ' + e.message;
+                      }}
+                    }});
+                  </script>
                 </body>
                 """
                 self._send(200, html.encode("utf-8"))
