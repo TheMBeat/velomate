@@ -656,12 +656,42 @@ def _render_preview_page(token: str, preview: dict) -> str:
       const loading = document.getElementById('loading');
       const importOutput = document.getElementById('importOutput');
       let importController = null;
+      let redirectTimer = null;
+      let importSucceeded = false;
       const renderSafeText = (element, value) => {{
         element.textContent = String(value ?? '');
       }};
 
+      const showPostImportActions = () => {{
+        if (document.getElementById('postImportActions')) return;
+        const wrapper = document.createElement('div');
+        wrapper.id = 'postImportActions';
+        wrapper.style.marginTop = '10px';
+        wrapper.style.display = 'flex';
+        wrapper.style.gap = '8px';
+
+        const backBtn = document.createElement('a');
+        backBtn.href = '/imports/fit';
+        backBtn.textContent = 'Zur Startseite';
+        backBtn.style.display = 'inline-block';
+        backBtn.style.background = '#2563eb';
+        backBtn.style.color = '#fff';
+        backBtn.style.textDecoration = 'none';
+        backBtn.style.borderRadius = '8px';
+        backBtn.style.padding = '8px 12px';
+        backBtn.style.fontWeight = '600';
+        wrapper.appendChild(backBtn);
+
+        importOutput.insertAdjacentElement('afterend', wrapper);
+      }};
+
       form.addEventListener('submit', async (event) => {{
         event.preventDefault();
+        if (importSucceeded) return;
+        if (redirectTimer) {{
+          window.clearTimeout(redirectTimer);
+          redirectTimer = null;
+        }}
         confirmBtn.disabled = true;
         cancelBtn.style.display = 'inline-block';
         loading.style.display = 'inline';
@@ -676,17 +706,24 @@ def _render_preview_page(token: str, preview: dict) -> str:
           }});
           const data = await res.json();
           if (!res.ok) throw new Error(data.error || `Import failed with status ${{res.status}}`);
-          renderSafeText(importOutput, `Import erfolgreich. Activity ${{data.activity_id}} (${{data.sample_count}} Samples).`);
-          window.location.href = '/imports/fit';
+          importSucceeded = true;
+          confirmBtn.disabled = true;
+          confirmBtn.style.display = 'none';
+          renderSafeText(importOutput, `Import erfolgreich. Activity ${{data.activity_id}} (${{data.sample_count}} Samples). Weiterleitung in 10 Sekunden oder über "Zur Startseite".`);
+          showPostImportActions();
+          redirectTimer = window.setTimeout(() => {{
+            window.location.href = '/imports/fit';
+          }}, 10000);
         }} catch (error) {{
           if (error.name === 'AbortError') {{
-            renderSafeText(importOutput, 'Import abgebrochen.');
+            renderSafeText(importOutput, 'Anfrage lokal gestoppt. Der Import kann serverseitig bereits abgeschlossen worden sein – bitte Startseite prüfen, bevor du erneut importierst.');
+            showPostImportActions();
           }} else {{
             renderSafeText(importOutput, `Import error: ${{error.message}}`);
           }}
         }} finally {{
           importController = null;
-          confirmBtn.disabled = false;
+          if (!importSucceeded) confirmBtn.disabled = false;
           cancelBtn.style.display = 'none';
           loading.style.display = 'none';
         }}
