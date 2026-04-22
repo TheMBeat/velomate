@@ -657,6 +657,7 @@ def _render_preview_page(token: str, preview: dict) -> str:
       const importOutput = document.getElementById('importOutput');
       let importController = null;
       let redirectTimer = null;
+      let importSucceeded = false;
       const renderSafeText = (element, value) => {{
         element.textContent = String(value ?? '');
       }};
@@ -686,6 +687,7 @@ def _render_preview_page(token: str, preview: dict) -> str:
 
       form.addEventListener('submit', async (event) => {{
         event.preventDefault();
+        if (importSucceeded) return;
         if (redirectTimer) {{
           window.clearTimeout(redirectTimer);
           redirectTimer = null;
@@ -704,6 +706,9 @@ def _render_preview_page(token: str, preview: dict) -> str:
           }});
           const data = await res.json();
           if (!res.ok) throw new Error(data.error || `Import failed with status ${{res.status}}`);
+          importSucceeded = true;
+          confirmBtn.disabled = true;
+          confirmBtn.style.display = 'none';
           renderSafeText(importOutput, `Import erfolgreich. Activity ${{data.activity_id}} (${{data.sample_count}} Samples). Weiterleitung in 10 Sekunden oder über "Zur Startseite".`);
           showPostImportActions();
           redirectTimer = window.setTimeout(() => {{
@@ -718,7 +723,7 @@ def _render_preview_page(token: str, preview: dict) -> str:
           }}
         }} finally {{
           importController = null;
-          confirmBtn.disabled = false;
+          if (!importSucceeded) confirmBtn.disabled = false;
           cancelBtn.style.display = 'none';
           loading.style.display = 'none';
         }}
