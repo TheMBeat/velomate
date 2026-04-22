@@ -415,24 +415,27 @@ def _render_hr_merge_page() -> str:
         };
 
         const renderPreviewSummary = (data) => {
-          const p = data.preview || {};
+          const p = data.fit_summary || data.preview || {};
+          const apple = data.apple_summary || {};
           renderMetrics([
             ['Start', p.start_time || '—'],
             ['Dauer (s)', p.duration_s],
-            ['Distanz (m)', p.distance_m],
-            ['Samples', p.sample_count],
-            ['Apple HR Punkte', data.apple_points_total],
+            ['FIT Records', p.record_count ?? p.sample_count],
+            ['Datei', p.source_file_name || '—'],
+            ['Apple HR Punkte', apple.point_count],
+            ['Apple Ø HR', apple.avg_hr],
             ['Apple Quelle', data.apple_source_type || 'auto']
           ]);
         };
 
         const renderRunSummary = (data) => {
           const r = data.report || {};
+          const summary = r.summary || {};
           renderMetrics([
             ['HR-Punkte geschrieben', r.hr_points_written],
-            ['Coverage', r.coverage_ratio],
-            ['Calories', r.calories_applied],
-            ['Temperatur', r.temperature_applied],
+            ['Coverage (%)', r.coverage_pct],
+            ['Calories', summary.calories],
+            ['Temperatur (°C)', summary.temperature_c],
             ['Output', data.filename || 'merged.fit'],
             ['Trace', data.trace_id || '—']
           ]);
