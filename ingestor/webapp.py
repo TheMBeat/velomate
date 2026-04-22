@@ -239,6 +239,7 @@ def _render_hr_merge_page() -> str:
       .card{max-width:980px;margin:16px auto;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px}
       .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px}
       .btn{cursor:pointer;background:var(--blue);color:#fff;border:0;border-radius:8px;padding:10px 14px;margin-top:10px;margin-right:8px;font-weight:600}
+      .btn-link{display:inline-block;text-decoration:none}
       .btn-secondary{background:var(--green)}
       .btn-danger{background:var(--red)}
       .btn:disabled{opacity:.65;cursor:not-allowed}
@@ -268,6 +269,9 @@ def _render_hr_merge_page() -> str:
         <h1>Apple HR + FIT Merger</h1>
         <p class='muted'>Ablauf: Datei wählen → Preview → Merge → Import. FIT-Timeline bleibt führend.</p>
         <p><a href='/imports/fit' style='color:#93c5fd'>← zurück zur Startseite</a></p>
+        <div>
+          <a href='/imports/fit' class='btn btn-link'>Neue Datei wählen</a>
+        </div>
         <form id='previewForm'>
           <div class='grid'>
             <div><label>FIT file</label><br/><input type='file' name='fit_file' accept='.fit' required/></div>
@@ -283,6 +287,7 @@ def _render_hr_merge_page() -> str:
         <div id='previewStatus' class='status'>
           <div><span class='spinner'></span><strong id='previewStatusText'>FIT wird gelesen</strong></div>
           <div class='progress'><span></span></div>
+          <button id='previewCancelBtn' type='button' class='btn btn-danger'>Preview abbrechen</button>
         </div>
         <hr style='border-color:#374151'/>
         <form id='runForm'>
@@ -297,10 +302,12 @@ def _render_hr_merge_page() -> str:
         <div id='runStatus' class='status'>
           <div><span class='spinner'></span><strong id='runStatusText'>Daten werden zusammengeführt</strong></div>
           <div class='progress'><span></span></div>
+          <button id='runCancelBtn' type='button' class='btn btn-danger'>Merge abbrechen</button>
         </div>
         <div id='importStatus' class='status'>
           <div><span class='spinner'></span><strong id='importStatusText'>FIT wird gelesen</strong></div>
           <div class='progress'><span></span></div>
+          <button id='importCancelBtn' type='button' class='btn btn-danger'>Import abbrechen</button>
         </div>
         <div id='summary' class='summary'></div>
         <div id='actions'></div>
@@ -314,6 +321,9 @@ def _render_hr_merge_page() -> str:
         let importToken = null;
         let artifactToken = null;
         let importedActivityId = null;
+        let previewController = null;
+        let runController = null;
+        let importController = null;
 
         const output = document.getElementById('output');
         const appleDebugOutput = document.getElementById('appleDebugOutput');
@@ -328,6 +338,9 @@ def _render_hr_merge_page() -> str:
         const importStatusText = document.getElementById('importStatusText');
         const previewButton = document.querySelector('#previewForm button[type="submit"]');
         const runButton = document.getElementById('runBtn');
+        const previewCancelBtn = document.getElementById('previewCancelBtn');
+        const runCancelBtn = document.getElementById('runCancelBtn');
+        const importCancelBtn = document.getElementById('importCancelBtn');
 
         const renderSafeText = (element, value) => {
           element.textContent = String(value ?? '');
@@ -431,7 +444,7 @@ def _render_hr_merge_page() -> str:
             ['Activity-ID', data.activity_id],
             ['Distanz (m)', p.distance_m],
             ['Dauer (s)', p.duration_s],
-            ['Höhenmeter (m)', p.total_ascent_m],
+            ['Höhenmeter (m)', p.elevation_m ?? p.total_ascent_m],
             ['Samples', data.sample_count],
             ['Datei', data.filename]
           ]);
@@ -464,7 +477,8 @@ def _render_hr_merge_page() -> str:
               const res = await fetch('/api/tools/fit-hr-merge/import', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ artifact_token: artifactToken })
+                body: JSON.stringify({ artifact_token: artifactToken }),
+                signal: (importController = new AbortController()).signal
               });
               importStatusText.textContent = 'Aktivität wird gespeichert';
               const data = await res.json();
@@ -475,8 +489,13 @@ def _render_hr_merge_page() -> str:
               renderImportSummary(data);
               renderDeleteButton(importedActivityId);
             } catch (error) {
-              renderSafeText(output, `Import error: ${error.message}`);
+              if (error.name === 'AbortError') {
+                renderSafeText(output, 'Import abgebrochen. Du kannst den Import erneut starten.');
+              } else {
+                renderSafeText(output, `Import error: ${error.message}`);
+              }
             } finally {
+              importController = null;
               setLoading(importStatus, false);
               importBtn.disabled = false;
             }
@@ -496,7 +515,9 @@ def _render_hr_merge_page() -> str:
             previewButton.disabled = true;
             setLoading(previewStatus, true, 'FIT wird gelesen');
             const fd = new FormData(e.target);
-            const res = await fetch('/api/tools/fit-hr-merge/preview', { method: 'POST', body: fd });
+            const controller = new AbortController();
+            previewController = controller;
+            const res = await fetch('/api/tools/fit-hr-merge/preview', { method: 'POST', body: fd, signal: controller.signal });
             previewStatusText.textContent = 'Apple-Daten werden analysiert';
             const data = await res.json();
             if (!res.ok) throw new Error(data.error || `Preview failed with status ${res.status}`);
@@ -511,8 +532,13 @@ def _render_hr_merge_page() -> str:
             renderPreviewSummary(data);
             renderJsonOutput(output, '', data);
           } catch (error) {
-            renderSafeText(output, `Preview error: ${error.message}`);
+            if (error.name === 'AbortError') {
+              renderSafeText(output, 'Preview abgebrochen.');
+            } else {
+              renderSafeText(output, `Preview error: ${error.message}`);
+            }
           } finally {
+            previewController = null;
             setLoading(previewStatus, false);
             previewButton.disabled = false;
           }
@@ -537,10 +563,13 @@ def _render_hr_merge_page() -> str:
               max_hr: Number(form.get('max_hr') || 240)
             };
 
+            const controller = new AbortController();
+            runController = controller;
             const res = await fetch('/api/tools/fit-hr-merge/run', {
               method: 'POST',
               headers: {'Content-Type':'application/json'},
-              body: JSON.stringify(payload)
+              body: JSON.stringify(payload),
+              signal: controller.signal
             });
             runStatusText.textContent = 'Herzfrequenz wird interpoliert';
             const data = await res.json();
@@ -552,11 +581,33 @@ def _render_hr_merge_page() -> str:
             renderJsonOutput(output, '', data);
             renderActions(data);
           } catch (error) {
-            renderSafeText(output, `Run error: ${error.message}`);
+            if (error.name === 'AbortError') {
+              renderSafeText(output, 'Merge abgebrochen.');
+            } else {
+              renderSafeText(output, `Run error: ${error.message}`);
+            }
           } finally {
+            runController = null;
             setLoading(runStatus, false);
             runButton.disabled = false;
           }
+        });
+
+        previewCancelBtn.addEventListener('click', () => {
+          if (previewController) previewController.abort();
+          setLoading(previewStatus, false);
+          previewButton.disabled = false;
+        });
+
+        runCancelBtn.addEventListener('click', () => {
+          if (runController) runController.abort();
+          setLoading(runStatus, false);
+          runButton.disabled = false;
+        });
+
+        importCancelBtn.addEventListener('click', () => {
+          if (importController) importController.abort();
+          setLoading(importStatus, false);
         });
       </script>
     </body></html>
@@ -570,12 +621,16 @@ def _render_preview_page(token: str, preview: dict) -> str:
       <div style='background:#1e293b;border:1px solid #334155;border-radius:14px;padding:20px'>
         <h2 style='margin-top:0'>FIT Preview: {preview['source_file_name']}</h2>
         <p style='color:#94a3b8'>Schritt 2/3: Vorschau prüfen und Import bestätigen.</p>
+        <div style='margin-bottom:12px;display:flex;gap:10px;flex-wrap:wrap'>
+          <a href='/imports/fit' style='display:inline-block;background:#2563eb;color:#fff;text-decoration:none;border-radius:8px;padding:10px 14px;font-weight:600'>Neue Datei wählen</a>
+          <a href='/imports/fit' style='display:inline-block;background:#1f2937;color:#e2e8f0;text-decoration:none;border:1px solid #334155;border-radius:8px;padding:10px 14px;font-weight:600'>Zur Startseite</a>
+        </div>
         <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px'>
           <div style='background:#0f172a;border:1px solid #334155;border-radius:10px;padding:10px'><small style='color:#94a3b8'>Start</small><div>{preview['start_time']}</div></div>
           <div style='background:#0f172a;border:1px solid #334155;border-radius:10px;padding:10px'><small style='color:#94a3b8'>Ende</small><div>{preview['end_time']}</div></div>
           <div style='background:#0f172a;border:1px solid #334155;border-radius:10px;padding:10px'><small style='color:#94a3b8'>Dauer (s)</small><div>{preview['duration_s']}</div></div>
           <div style='background:#0f172a;border:1px solid #334155;border-radius:10px;padding:10px'><small style='color:#94a3b8'>Distanz (m)</small><div>{preview['distance_m']}</div></div>
-          <div style='background:#0f172a;border:1px solid #334155;border-radius:10px;padding:10px'><small style='color:#94a3b8'>Höhenmeter (m)</small><div>{preview.get('total_ascent_m', '—')}</div></div>
+          <div style='background:#0f172a;border:1px solid #334155;border-radius:10px;padding:10px'><small style='color:#94a3b8'>Höhenmeter (m)</small><div>{preview.get('elevation_m', preview.get('total_ascent_m', '—'))}</div></div>
           <div style='background:#0f172a;border:1px solid #334155;border-radius:10px;padding:10px'><small style='color:#94a3b8'>Samples</small><div>{preview['sample_count']}</div></div>
         </div>
         <details style='margin-top:12px;border:1px solid #334155;border-radius:10px;padding:8px 12px;background:#0f172a'>
@@ -585,15 +640,57 @@ def _render_preview_page(token: str, preview: dict) -> str:
         <form action='/imports/fit/confirm' method='post' style='margin-top:14px'>
           <input type='hidden' name='import_token' value='{token}' />
           <button id='confirmBtn' style='background:#2563eb;color:#fff;border:0;border-radius:8px;padding:10px 16px;font-weight:600' type='submit'>Jetzt importieren</button>
+          <button id='cancelBtn' style='display:none;background:#dc2626;color:#fff;border:0;border-radius:8px;padding:10px 16px;font-weight:600;margin-left:8px' type='button'>Import abbrechen</button>
           <span id='loading' style='display:none;margin-left:8px;color:#93c5fd'>Import läuft…</span>
         </form>
+        <pre id='importOutput' style='white-space:pre-wrap;background:#0f172a;border:1px solid #334155;padding:12px;border-radius:8px;margin-top:12px;'>Noch kein Import gestartet.</pre>
       </div>
     </div>
     <script>
       const form = document.querySelector('form[action="/imports/fit/confirm"]');
-      form.addEventListener('submit', () => {{
-        document.getElementById('confirmBtn').disabled = true;
-        document.getElementById('loading').style.display = 'inline';
+      const confirmBtn = document.getElementById('confirmBtn');
+      const cancelBtn = document.getElementById('cancelBtn');
+      const loading = document.getElementById('loading');
+      const importOutput = document.getElementById('importOutput');
+      let importController = null;
+      const renderSafeText = (element, value) => {{
+        element.textContent = String(value ?? '');
+      }};
+
+      form.addEventListener('submit', async (event) => {{
+        event.preventDefault();
+        confirmBtn.disabled = true;
+        cancelBtn.style.display = 'inline-block';
+        loading.style.display = 'inline';
+        importController = new AbortController();
+        try {{
+          const payload = {{ import_token: '{token}' }};
+          const res = await fetch('/api/imports/fit/confirm', {{
+            method: 'POST',
+            headers: {{ 'Content-Type': 'application/json' }},
+            body: JSON.stringify(payload),
+            signal: importController.signal
+          }});
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || `Import failed with status ${{res.status}}`);
+          renderSafeText(importOutput, `Import erfolgreich. Activity ${{data.activity_id}} (${{data.sample_count}} Samples).`);
+          window.location.href = '/imports/fit';
+        }} catch (error) {{
+          if (error.name === 'AbortError') {{
+            renderSafeText(importOutput, 'Import abgebrochen.');
+          }} else {{
+            renderSafeText(importOutput, `Import error: ${{error.message}}`);
+          }}
+        }} finally {{
+          importController = null;
+          confirmBtn.disabled = false;
+          cancelBtn.style.display = 'none';
+          loading.style.display = 'none';
+        }}
+      }});
+
+      cancelBtn.addEventListener('click', () => {{
+        if (importController) importController.abort();
       }});
     </script>
     </body></html>
@@ -828,6 +925,8 @@ class _Handler(BaseHTTPRequestHandler):
                     <p>Activity <strong>{activity_id}</strong> gespeichert ({sample_count} Samples).</p>
                     <div style='display:flex;gap:10px;flex-wrap:wrap;margin-top:12px'>
                       <a href='/imports/fit' style='display:inline-block;background:#2563eb;color:#fff;text-decoration:none;border-radius:8px;padding:10px 14px;font-weight:600'>Weiterer Import</a>
+                      <a href='/tools/fit-hr-merge' style='display:inline-block;background:#1f2937;color:#e2e8f0;text-decoration:none;border:1px solid #334155;border-radius:8px;padding:10px 14px;font-weight:600'>Zurück zum Merge</a>
+                      <a href='/imports/fit' style='display:inline-block;background:#1f2937;color:#e2e8f0;text-decoration:none;border:1px solid #334155;border-radius:8px;padding:10px 14px;font-weight:600'>Zur Startseite</a>
                       <button id='deleteBtn' style='background:#dc2626;color:#fff;border:0;border-radius:8px;padding:10px 16px;font-weight:600' type='button'>Diese Aktivität löschen</button>
                     </div>
                     <pre id="deleteResult" style="white-space:pre-wrap;background:#0f172a;border:1px solid #334155;padding:12px;border-radius:8px;margin-top:12px;">Noch kein Löschvorgang gestartet.</pre>
