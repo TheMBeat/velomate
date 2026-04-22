@@ -193,6 +193,9 @@ def _render_upload_page() -> str:
       const deleteStatus = document.getElementById('deleteStatus');
       const deleteStatusText = document.getElementById('deleteStatusText');
       const deleteOutput = document.getElementById('deleteOutput');
+      const renderSafeText = (element, value) => {
+        element.textContent = String(value ?? '');
+      };
 
       const setDeleteLoading = (active, message='') => {
         deleteBtn.disabled = active;
@@ -214,9 +217,9 @@ def _render_upload_page() -> str:
           });
           const data = await res.json();
           if (!res.ok) throw new Error(data.error || `Delete failed with status ${res.status}`);
-          deleteOutput.innerHTML = `<span class="success">Erfolgreich gelöscht: Activity ${data.activity_id}</span>\\n\\n` + JSON.stringify(data, null, 2);
+          renderSafeText(deleteOutput, `Erfolgreich gelöscht: Activity ${data.activity_id}\\n\\n${JSON.stringify(data, null, 2)}`);
         } catch (error) {
-          deleteOutput.innerHTML = `<span class="danger">Delete error: ${error.message}</span>`;
+          renderSafeText(deleteOutput, `Delete error: ${error.message}`);
         } finally {
           setDeleteLoading(false);
         }
@@ -326,10 +329,34 @@ def _render_hr_merge_page() -> str:
         const previewButton = document.querySelector('#previewForm button[type="submit"]');
         const runButton = document.getElementById('runBtn');
 
-        const clearActions = () => { actions.innerHTML = ''; };
-        const clearSummary = () => { summary.innerHTML = ''; };
-        const renderMetric = (label, value) =>
-          `<div class="metric"><span class="label">${label}</span><span class="value">${value ?? '—'}</span></div>`;
+        const renderSafeText = (element, value) => {
+          element.textContent = String(value ?? '');
+        };
+        const clearActions = () => { actions.replaceChildren(); };
+        const clearSummary = () => { summary.replaceChildren(); };
+        const renderMetric = (label, value) => {
+          const metric = document.createElement('div');
+          metric.className = 'metric';
+          const labelEl = document.createElement('span');
+          labelEl.className = 'label';
+          renderSafeText(labelEl, label);
+          const valueEl = document.createElement('span');
+          valueEl.className = 'value';
+          renderSafeText(valueEl, value ?? '—');
+          metric.appendChild(labelEl);
+          metric.appendChild(valueEl);
+          return metric;
+        };
+        const renderMetrics = (items) => {
+          clearSummary();
+          for (const [label, value] of items) {
+            summary.appendChild(renderMetric(label, value));
+          }
+        };
+        const renderJsonOutput = (element, prefix, payload) => {
+          const json = JSON.stringify(payload, null, 2);
+          renderSafeText(element, prefix ? `${prefix}\\n\\n${json}` : json);
+        };
         const setLoading = (section, active, message='') => {
           section.classList.toggle('active', active);
           if (message) {
@@ -375,42 +402,39 @@ def _render_hr_merge_page() -> str:
         };
 
         const renderPreviewSummary = (data) => {
-          clearSummary();
           const p = data.preview || {};
-          summary.innerHTML = [
-            renderMetric('Start', p.start_time || '—'),
-            renderMetric('Dauer (s)', p.duration_s),
-            renderMetric('Distanz (m)', p.distance_m),
-            renderMetric('Samples', p.sample_count),
-            renderMetric('Apple HR Punkte', data.apple_points_total),
-            renderMetric('Apple Quelle', data.apple_source_type || 'auto')
-          ].join('');
+          renderMetrics([
+            ['Start', p.start_time || '—'],
+            ['Dauer (s)', p.duration_s],
+            ['Distanz (m)', p.distance_m],
+            ['Samples', p.sample_count],
+            ['Apple HR Punkte', data.apple_points_total],
+            ['Apple Quelle', data.apple_source_type || 'auto']
+          ]);
         };
 
         const renderRunSummary = (data) => {
-          clearSummary();
           const r = data.report || {};
-          summary.innerHTML = [
-            renderMetric('HR-Punkte geschrieben', r.hr_points_written),
-            renderMetric('Coverage', r.coverage_ratio),
-            renderMetric('Calories', r.calories_applied),
-            renderMetric('Temperatur', r.temperature_applied),
-            renderMetric('Output', data.filename || 'merged.fit'),
-            renderMetric('Trace', data.trace_id || '—')
-          ].join('');
+          renderMetrics([
+            ['HR-Punkte geschrieben', r.hr_points_written],
+            ['Coverage', r.coverage_ratio],
+            ['Calories', r.calories_applied],
+            ['Temperatur', r.temperature_applied],
+            ['Output', data.filename || 'merged.fit'],
+            ['Trace', data.trace_id || '—']
+          ]);
         };
 
         const renderImportSummary = (data) => {
-          clearSummary();
           const p = data.preview || {};
-          summary.innerHTML = [
-            renderMetric('Activity-ID', data.activity_id),
-            renderMetric('Distanz (m)', p.distance_m),
-            renderMetric('Dauer (s)', p.duration_s),
-            renderMetric('Höhenmeter (m)', p.total_ascent_m),
-            renderMetric('Samples', data.sample_count),
-            renderMetric('Datei', data.filename)
-          ].join('');
+          renderMetrics([
+            ['Activity-ID', data.activity_id],
+            ['Distanz (m)', p.distance_m],
+            ['Dauer (s)', p.duration_s],
+            ['Höhenmeter (m)', p.total_ascent_m],
+            ['Samples', data.sample_count],
+            ['Datei', data.filename]
+          ]);
         };
 
         const renderActions = (data) => {
@@ -446,12 +470,12 @@ def _render_hr_merge_page() -> str:
               const data = await res.json();
               if (!res.ok) throw new Error(data.error || `Import failed with status ${res.status}`);
               importStatusText.textContent = 'Streams werden geschrieben';
-              output.innerHTML = `<span class="success">Import erfolgreich.</span>\\n\\n` + JSON.stringify(data, null, 2);
+              renderJsonOutput(output, 'Import erfolgreich.', data);
               importedActivityId = data.activity_id;
               renderImportSummary(data);
               renderDeleteButton(importedActivityId);
             } catch (error) {
-              output.innerHTML = `<span class="danger">Import error: ${error.message}</span>`;
+              renderSafeText(output, `Import error: ${error.message}`);
             } finally {
               setLoading(importStatus, false);
               importBtn.disabled = false;
@@ -485,9 +509,9 @@ def _render_hr_merge_page() -> str:
 
             renderAppleDebug(data);
             renderPreviewSummary(data);
-            output.textContent = JSON.stringify(data, null, 2);
+            renderJsonOutput(output, '', data);
           } catch (error) {
-            output.innerHTML = `<span class="danger">Preview error: ${error.message}</span>`;
+            renderSafeText(output, `Preview error: ${error.message}`);
           } finally {
             setLoading(previewStatus, false);
             previewButton.disabled = false;
@@ -525,10 +549,10 @@ def _render_hr_merge_page() -> str:
 
             renderAppleDebug(data);
             renderRunSummary(data);
-            output.textContent = JSON.stringify(data, null, 2);
+            renderJsonOutput(output, '', data);
             renderActions(data);
           } catch (error) {
-            output.innerHTML = `<span class="danger">Run error: ${error.message}</span>`;
+            renderSafeText(output, `Run error: ${error.message}`);
           } finally {
             setLoading(runStatus, false);
             runButton.disabled = false;
